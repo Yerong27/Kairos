@@ -90,7 +90,7 @@ Gemini 分析和 Notion 写入可能需要一些时间。保持 extension 弹窗
 首次安装执行：
 
 ```bash
-git clone <your-Kairos-repository-url>
+git clone https://github.com/Yerong27/Kairos.git
 cd Kairos
 python3 -m venv .venv
 source .venv/bin/activate
