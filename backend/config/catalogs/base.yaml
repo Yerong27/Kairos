@@ -1,0 +1,94 @@
+{
+  "domains": [
+    {
+      "id": "problem_solving",
+      "label": "Problem Solving",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["solved", "troubleshoot", "root cause", "resolved issues", "analysis", "debugged", "investigated"],
+      "aliases_weak": ["issue", "problem"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "communication",
+      "label": "Communication",
+      "facet": "people",
+      "allowed_must": false,
+      "aliases_strong": ["communicate", "present", "document", "explain", "write-up"],
+      "aliases_weak": ["stakeholder", "update", "report"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "ownership_accountability",
+      "label": "Ownership & Accountability",
+      "facet": "process",
+      "allowed_must": true,
+      "aliases_strong": ["owned", "responsible for", "end-to-end", "accountable", "independently", "owner"],
+      "aliases_weak": ["accountability"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "execution_delivery",
+      "label": "Execution & Delivery",
+      "facet": "process",
+      "allowed_must": true,
+      "aliases_strong": ["delivered", "shipped", "completed", "implemented", "executed", "launched"],
+      "aliases_weak": ["deadline", "timeline"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "process_improvement",
+      "label": "Process Improvement",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["improved", "optimized", "streamlined", "reduced", "increased efficiency", "automation"],
+      "aliases_weak": ["efficiency", "process"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "analytical_thinking",
+      "label": "Analytical Thinking",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["analyze", "evaluate", "metrics", "insights", "data-driven", "hypothesis"],
+      "aliases_weak": ["data", "analysis"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "learning_adaptability",
+      "label": "Learning & Adaptability",
+      "facet": "people",
+      "allowed_must": false,
+      "aliases_strong": ["learned", "self-taught", "adapted", "picked up", "ramped up", "quickly learned"],
+      "aliases_weak": ["learn", "adapt"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "collaboration_teamwork",
+      "label": "Teamwork & Collaboration",
+      "facet": "people",
+      "allowed_must": false,
+      "aliases_strong": ["worked with", "partnered", "cross-functional", "team", "paired"],
+      "aliases_weak": ["collaborate", "coordinate"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    }
+  ],
+  "policy": {
+    "allowed_must_domains": [
+      "ownership_accountability",
+      "execution_delivery"
+    ],
+    "max_must_count": 2
+  },
+  "aliases_global": {
+    "canonicalize": {}
+  }
+}

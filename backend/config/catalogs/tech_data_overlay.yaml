@@ -1,0 +1,92 @@
+{
+  "domains": [
+    {
+      "id": "software_development",
+      "label": "Software Development",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["develop", "build", "implement", "codebase", "application", "software", "sdlc"],
+      "aliases_weak": ["system"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    },
+    {
+      "id": "data_engineering",
+      "label": "Data Engineering",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["etl", "pipeline", "data processing", "batch", "streaming", "data pipeline"],
+      "aliases_weak": ["data"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    },
+    {
+      "id": "data_analysis",
+      "label": "Data Analysis",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["analyze data", "sql", "dashboard", "reporting", "insights"],
+      "aliases_weak": ["analysis", "query"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    },
+    {
+      "id": "machine_learning",
+      "label": "Machine Learning",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["model", "training", "inference", "evaluation", "feature"],
+      "aliases_weak": ["ml", "machine learning"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    },
+    {
+      "id": "generative_ai",
+      "label": "Generative AI",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["llm", "prompt", "embeddings", "generative ai", "tool calling", "function calling"],
+      "aliases_weak": ["genai", "llm api"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    },
+    {
+      "id": "rag_systems",
+      "label": "RAG Systems",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["rag", "vector search", "retrieval", "embeddings", "vector database"],
+      "aliases_weak": ["retrieval-augmented", "semantic search"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    },
+    {
+      "id": "cloud_platforms",
+      "label": "Cloud Platforms",
+      "facet": "technical",
+      "allowed_must": true,
+      "aliases_strong": ["cloud", "aws", "gcp", "azure", "serverless", "cloud platform"],
+      "aliases_weak": ["infrastructure"],
+      "domain_type": "hard",
+      "default_weight": 1.0
+    }
+  ],
+  "policy": {
+    "allowed_must_domains": [
+      "software_development",
+      "data_engineering",
+      "data_analysis",
+      "machine_learning",
+      "generative_ai",
+      "rag_systems",
+      "cloud_platforms"
+    ],
+    "max_must_count": 4
+  },
+  "aliases_global": {
+    "canonicalize": {
+      "programming": "software_development",
+      "programming skills": "software_development"
+    }
+  }
+}

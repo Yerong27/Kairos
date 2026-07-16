@@ -1,0 +1,32 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local user data (contains OAuth tokens, resumes, and analysis content)
+/data/
+/.kairos_data/
+/debug_runs/
+/Resume*.pdf
+/test_data/
+/test_integration_v3.py
+
+# Historical/evaluation material not required to run Kairos
+/archive/
+/backend/eval/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

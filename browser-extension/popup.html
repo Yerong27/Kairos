@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Kairos Job Agent</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="section">
+      <div class="title">Step 1 — Connect Notion</div>
+      <div id="notion-status">Checking...</div>
+      <div id="db-name" class="muted"></div>
+      <div class="row">
+        <button id="connect-btn">Connect Notion</button>
+        <button id="change-db-btn">Change database</button>
+      </div>
+      <div id="notion-msg" class="muted"></div>
+    </div>
+
+    <div class="section" id="resume-section">
+      <div class="title">Step 2 — Upload Resume (once)</div>
+      <div id="resume-status">Checking...</div>
+      <div id="resume-meta" class="muted"></div>
+      <div class="row file-row">
+        <input type="file" id="resume-file" accept=".txt,.pdf" class="file-input" />
+        <button id="choose-file-btn" type="button">Choose file</button>
+        <div id="file-name" class="muted file-name">No file selected</div>
+        <button id="upload-btn" type="button">Upload</button>
+      </div>
+      <div id="upload-msg" class="muted"></div>
+      <div class="row">
+        <button id="open-upload-btn">Open upload page</button>
+      </div>
+    </div>
+
+    <div class="section" id="analyze-section">
+      <div class="title">Step 3 — Analyze This Page</div>
+      <button id="analyze-btn">Analyze this page</button>
+      <div id="analyze-msg" class="muted"></div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

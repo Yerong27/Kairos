@@ -1,0 +1,270 @@
+{
+  "version": "1.0",
+  "domains": [
+    {
+      "id": "software_development",
+      "label": "Software Development",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.0,
+      "allowed_must": true,
+      "aliases_strong": [
+        "software development",
+        "programming",
+        "coding"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "swe_principles",
+      "label": "Software Engineering Principles",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 0.8,
+      "allowed_must": true,
+      "aliases_strong": [
+        "sdlc",
+        "secure coding",
+        "automated testing",
+        "unit testing",
+        "integration testing",
+        "e2e testing",
+        "code review",
+        "static analysis",
+        "lint",
+        "type checking"
+      ],
+      "aliases_weak": [
+        "observability",
+        "logging",
+        "monitoring",
+        "rollback",
+        "release process"
+      ]
+    },
+    {
+      "id": "ci_cd",
+      "label": "CI/CD Integration",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 0.8,
+      "allowed_must": true,
+      "aliases_strong": [
+        "ci/cd",
+        "pipeline",
+        "pipelines",
+        "release pipeline",
+        "build pipeline",
+        "deploy pipeline",
+        "continuous integration",
+        "continuous delivery",
+        "continuous deployment",
+        "github actions",
+        "gitlab ci"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "api_development",
+      "label": "API Development",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 0.9,
+      "allowed_must": false,
+      "aliases_strong": [
+        "api development",
+        "microservices",
+        "rest api",
+        "grpc"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "cloud_platforms",
+      "label": "Cloud Platforms",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.0,
+      "allowed_must": true,
+      "aliases_strong": [
+        "aws",
+        "azure",
+        "gcp",
+        "cloud platform",
+        "cloud infrastructure"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "containerization",
+      "label": "Containerization",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 0.8,
+      "allowed_must": false,
+      "aliases_strong": [
+        "docker",
+        "kubernetes"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "genai",
+      "label": "Generative AI Development",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.2,
+      "allowed_must": true,
+      "aliases_strong": [
+        "llm",
+        "llms",
+        "large language model",
+        "large language models",
+        "generative ai",
+        "inference",
+        "prompt engineering",
+        "tool calling",
+        "function calling",
+        "guardrail",
+        "evals",
+        "structured output"
+      ],
+      "aliases_weak": [
+        "prompt",
+        "openai",
+        "chatgpt"
+      ]
+    },
+    {
+      "id": "data_engineering",
+      "label": "Data Engineering",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.0,
+      "allowed_must": true,
+      "aliases_strong": [
+        "sql",
+        "etl",
+        "data pipeline",
+        "data engineering",
+        "data warehouse"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "version_control",
+      "label": "Version Control",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 0.7,
+      "allowed_must": true,
+      "aliases_strong": [
+        "git",
+        "github",
+        "gitlab",
+        "version control"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "software_development",
+      "label": "Software Development",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.0,
+      "allowed_must": true,
+      "aliases_strong": [
+        "software development",
+        "programming",
+        "coding",
+        "python",
+        "java",
+        "golang",
+        "rust",
+        "c++",
+        "typescript",
+        "javascript"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "rag",
+      "label": "RAG Systems",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.1,
+      "allowed_must": true,
+      "aliases_strong": [
+        "rag",
+        "retrieval augmented",
+        "retrieval-augmented",
+        "vector search",
+        "vector database",
+        "embeddings",
+        "rerank",
+        "chunking"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "agentic_ai",
+      "label": "Agentic AI Systems",
+      "facet": "technical",
+      "domain_type": "hard",
+      "default_weight": 1.1,
+      "allowed_must": false,
+      "aliases_strong": [
+        "agentic",
+        "multi-agent",
+        "autogen",
+        "semantic kernel"
+      ],
+      "aliases_weak": []
+    },
+    {
+      "id": "collaboration",
+      "label": "Collaboration",
+      "facet": "people",
+      "domain_type": "soft",
+      "default_weight": 0.5,
+      "allowed_must": false,
+      "aliases_strong": [
+        "jira",
+        "confluence",
+        "scrum",
+        "agile"
+      ],
+      "aliases_weak": [
+        "stakeholder",
+        "cross-functional",
+        "alignment"
+      ]
+    },
+    {
+      "id": "problem_solving",
+      "label": "Problem Solving",
+      "facet": "process",
+      "domain_type": "soft",
+      "default_weight": 0.5,
+      "allowed_must": false,
+      "aliases_strong": [
+        "problem solving",
+        "own complex problems"
+      ],
+      "aliases_weak": []
+    }
+  ],
+  "aliases_global": {
+    "canonicalize": {
+      "programming": "software_development",
+      "python": "software_development",
+      "sql": "data_engineering",
+      "problem solving": "problem_solving",
+      "software engineering": "swe_principles",
+      "software engineering principles": "swe_principles",
+      "ci/cd pipelines": "ci_cd",
+      "ci/cd integration": "ci_cd"
+    }
+  },
+  "industry_overrides": {}
+}

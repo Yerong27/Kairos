@@ -1,0 +1,71 @@
+{
+  "domains": [
+    {
+      "id": "business_operations",
+      "label": "Business Operations",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["operations", "workflow", "coordination", "operations support", "back office"],
+      "aliases_weak": ["process"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "finance_accounting",
+      "label": "Finance & Accounting",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["accounting", "finance", "reporting", "reconciliation", "budgeting", "financial statements"],
+      "aliases_weak": ["ledger"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "compliance_risk",
+      "label": "Compliance & Risk",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["compliance", "regulation", "audit", "risk", "controls"],
+      "aliases_weak": ["policy"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "sales_customer",
+      "label": "Sales & Customer Engagement",
+      "facet": "people",
+      "allowed_must": false,
+      "aliases_strong": ["customer", "client", "sales", "account management", "pipeline"],
+      "aliases_weak": ["relationship"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "marketing_growth",
+      "label": "Marketing & Growth",
+      "facet": "process",
+      "allowed_must": false,
+      "aliases_strong": ["marketing", "campaign", "growth", "acquisition", "lead gen"],
+      "aliases_weak": ["brand"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    },
+    {
+      "id": "hr_people",
+      "label": "HR & People Operations",
+      "facet": "people",
+      "allowed_must": false,
+      "aliases_strong": ["hiring", "recruitment", "people", "hr", "talent"],
+      "aliases_weak": ["onboarding"],
+      "domain_type": "soft",
+      "default_weight": 1.0
+    }
+  ],
+  "policy": {
+    "allowed_must_domains": [],
+    "max_must_count": 2
+  },
+  "aliases_global": {
+    "canonicalize": {}
+  }
+}
