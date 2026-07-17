@@ -2,9 +2,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.ir.schema_v3 import AnalyzeIRv3, DomainRequirement, ToolEvidence
+from backend.ir.domain_catalog import DomainCatalog, adjudicate_domains
 from backend.llm import analyze_v3 as analyzer
 from backend.notion import writer
-from backend.scoring.scoring_engine_v3 import _gap_bucket, score_ir_v3, score_to_public_dict
+from backend.scoring.scoring_engine_v3 import (
+    _dedupe_domains_by_canon,
+    _gap_bucket,
+    score_ir_v3,
+    score_to_public_dict,
+)
 
 
 def test_top_level_gemini_schema_survives_normalization():
@@ -161,6 +167,46 @@ def test_jd_tool_extraction_deduplicates_databases_and_drops_low_signal_concepts
     assert "containers" not in tools
 
 
+def test_grounded_requirement_not_in_catalog_is_preserved_and_verified():
+    requirement = DomainRequirement(
+        name="Operating System Management",
+        importance="should",
+        evidence_quote="Linux installation and management, including working from a shell",
+        anchors=["Linux", "shell"],
+    )
+    catalog = DomainCatalog(
+        domains={},
+        aliases_global={},
+        allowed_must_domains=[],
+        max_must_count=None,
+    )
+
+    result = adjudicate_domains(
+        [requirement],
+        jd_text="Experience with Linux installation and management, including working from a shell.",
+        catalog=catalog,
+    )
+
+    assert len(result) == 1
+    assert result[0].domain_id.startswith("custom:")
+    assert result[0].evidence_level == "exact"
+    assert result[0].evidence_status == "verified"
+
+
+def test_uncatalogued_requirements_do_not_collapse_into_one_other_bucket():
+    domains = [
+        DomainRequirement(name="Scripting", importance="should", domain_id="other_info"),
+        DomainRequirement(name="Database Management", importance="should", domain_id="other_info"),
+        DomainRequirement(name="System Integration", importance="should", domain_id="other_info"),
+    ]
+
+    assert [item.name for item in _dedupe_domains_by_canon(domains)] == [
+        "Scripting",
+        "Database Management",
+        "System Integration",
+    ]
+
+
 def test_one_level_more_experienced_is_not_labeled_overqualified():
     assert _gap_bucket(-1.0) == "none"
     assert _gap_bucket(-2.0) == "overqualified"
@@ -256,8 +302,9 @@ def test_notion_uses_user_facing_summary_without_evidence_matrix():
     assert "Resume evidence" not in serialized
     assert "API Development" in serialized
     assert "Observability" in serialized
-    assert "⚠️ Gaps (recommended)" in serialized
-    assert "💪 Strengths" in serialized
+    assert "🎯 JD Requirements Match" in serialized
+    assert "❌ Missing" in serialized
+    assert "✅ Matched" in serialized
     assert "🧰 Tool Match" in serialized
     assert "⚠️ Not shown in resume" in serialized
     assert "Extracted Tools (JD)" not in serialized

@@ -678,7 +678,9 @@ def _canonical_domain_key(name: str, domain_id: Optional[str] = None) -> str:
     Canonicalize domain names to merge obvious duplicates (e.g., CI/CD Integration vs Pipelines).
     Keeps this small to stay domain-agnostic and avoid overfitting.
     """
-    if domain_id:
+    # `other_info` is a bucket, not an identity. Using it as the canonical key
+    # previously collapsed every uncatalogued JD requirement into one item.
+    if domain_id and _canon_token(domain_id) != "other info":
         did = _canon_token(domain_id)
         if did:
             return did

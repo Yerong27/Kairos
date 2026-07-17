@@ -233,13 +233,30 @@ def adjudicate_domains(
         dom = _find_catalog_domain(catalog, d.name, hint_id=getattr(d, "domain_id", None))
 
         if not dom:
-            # Unknown bucket
+            # The catalog is a normalization aid, not an allowlist. A new or
+            # role-specific requirement with a verbatim JD quote is still a
+            # valid requirement and must survive into matching/output.
+            evidence_quote = getattr(d, "evidence_quote", "") or ""
+            exact_span = _span_exact_match(evidence_quote, jd_text)
             try:
-                setattr(d, "domain_id", "other_info")
-                setattr(d, "evidence_level", "none")
-                setattr(d, "importance", "should")  # Force downgrade
-                setattr(d, "span_meta", {"method": "none", "found": False, "text": ""})
-            except Exception: pass
+                if exact_span:
+                    slug = re.sub(r"[^a-z0-9]+", "_", _normalize(d.name)).strip("_")
+                    setattr(d, "domain_id", f"custom:{slug or 'requirement'}")
+                    setattr(d, "evidence_level", "exact")
+                    setattr(d, "evidence_status", "verified")
+                    setattr(
+                        d,
+                        "span_meta",
+                        {"method": "exact", "found": True, "text": exact_span[2]},
+                    )
+                else:
+                    setattr(d, "domain_id", "other_info")
+                    setattr(d, "evidence_level", "none")
+                    setattr(d, "evidence_status", "unverified")
+                    setattr(d, "importance", "should")
+                    setattr(d, "span_meta", {"method": "none", "found": False, "text": ""})
+            except Exception:
+                pass
             out.append(d)
             continue
 

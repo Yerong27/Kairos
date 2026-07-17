@@ -807,6 +807,61 @@ def _render_requirement_matrix_to_notion(public_contract: Dict[str, Any], resp: 
     return blocks
 
 
+def _render_requirement_summary_to_notion(public_contract: Dict[str, Any]) -> List[dict]:
+    """Show the complete JD match once, without evidence text or toggles."""
+    requirements = _get_in(public_contract, ["requirements"], {})
+    if not isinstance(requirements, dict):
+        return []
+    items = [x for x in _as_list(requirements.get("items")) if isinstance(x, dict)]
+    if not items:
+        return []
+
+    groups: Dict[str, List[str]] = {
+        "missing": [],
+        "partial": [],
+        "matched": [],
+        "unverified": [],
+    }
+    for item in items[:40]:
+        name = _safe_str(item.get("name"), "Unnamed requirement").strip()
+        if not name:
+            continue
+        importance = _safe_str(item.get("importance"), "should").strip().lower()
+        status = _safe_str(item.get("status"), "unverified").strip().lower()
+        if status not in groups:
+            status = "unverified"
+        label = f"[MUST] {name}" if importance == "must" else name
+        groups[status].append(label)
+
+    matched = len(groups["matched"])
+    partial = len(groups["partial"])
+    missing = len(groups["missing"])
+    total = sum(len(values) for values in groups.values())
+    blocks: List[dict] = [
+        _notion_heading("🎯 JD Requirements Match", level=2),
+        {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "icon": {"emoji": "✅" if missing == 0 else "⚠️"},
+                "rich_text": _notion_rich_text(
+                    f"{matched} matched • {partial} partial • {missing} missing • {total} total"
+                ),
+            },
+        },
+    ]
+    for status, heading in (
+        ("missing", "❌ Missing"),
+        ("partial", "🟡 Partial"),
+        ("matched", "✅ Matched"),
+        ("unverified", "❓ Could not verify"),
+    ):
+        values = _dedupe_keep_order(groups[status])
+        if values:
+            blocks.extend(_notion_bullets(heading, values, heading_level=3, max_items=30))
+    return blocks
+
+
 def create_notion_page(
     req: Any,
     resp: Any,
@@ -868,34 +923,32 @@ def create_notion_page(
         _notion_divider(),
     ]
 
-    # Keep the user-facing page focused on the decision, gaps, strengths, and
-    # actions. The requirement evidence matrix remains available internally
-    # for scoring/debugging but is intentionally not rendered into Notion.
     if isinstance(public_contract, dict):
-        blocks.extend(_render_missing_to_notion(public_contract))
-        blocks.append(_notion_divider())
-
-        strengths = _as_list(_get_in(public_contract, ["strengths"], []))
-        missing_all = _as_list(_get_in(public_contract, ["missing", "all"], []))
-        display_required = _as_list(public_contract.get("display_required_domains") or [])
-        display_evidence = public_contract.get("display_domain_evidence") or {}
-
-        if (not strengths or all(not s.get("items") for s in strengths if isinstance(s, dict))) and not missing_all:
-            if display_required:
-                blocks.append(_notion_heading("📌 Requirements (unverified)", level=2))
-                items = []
-                for d in display_required[:20]:
-                    tag = str(display_evidence.get(d, "unknown")).upper()
-                    items.append(f"{d} — {tag}")
-                for it in items:
-                    blocks.append(
-                        {
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {"rich_text": _notion_rich_text(it)},
-                        }
+        requirement_blocks = _render_requirement_summary_to_notion(public_contract)
+        if requirement_blocks:
+            blocks.extend(requirement_blocks)
+        else:
+            # Compatibility for cache entries created before the complete
+            # requirement contract existed.
+            blocks.extend(_render_missing_to_notion(public_contract))
+            domains_s, _tools_s, other_s = _split_strengths(public_contract)
+            display_required = _as_list(public_contract.get("display_required_domains") or [])
+            if domains_s or other_s:
+                blocks.append(_notion_heading("💪 Strengths", level=2))
+                if domains_s:
+                    blocks.extend(_notion_bullets("Domains", domains_s, heading_level=3, max_items=30))
+                if other_s:
+                    blocks.extend(_notion_bullets("Other", other_s, heading_level=3, max_items=30))
+            elif display_required:
+                blocks.extend(
+                    _notion_bullets(
+                        "📌 Requirements",
+                        [_safe_str(item) for item in display_required],
+                        heading_level=2,
+                        max_items=30,
                     )
-                blocks.append(_notion_divider())
+                )
+        blocks.append(_notion_divider())
 
         actions = _as_list(_get_in(public_contract, ["actions"], []))
         blocks.extend(_notion_bullets("✅ Actions", _norm_strengths_gaps_items(actions), heading_level=2))
@@ -925,14 +978,6 @@ def create_notion_page(
                 }
             )
             blocks.append(_notion_divider())
-
-        domains_s, tools_s, other_s = _split_strengths(public_contract)
-        blocks.append(_notion_heading("💪 Strengths", level=2))
-        if domains_s:
-            blocks.extend(_notion_bullets("Domains", domains_s, heading_level=3, max_items=30))
-        if other_s:
-            blocks.extend(_notion_bullets("Other", other_s, heading_level=3, max_items=30))
-        blocks.append(_notion_divider())
 
         tool_blocks = _render_tool_match_to_notion(public_contract)
         if tool_blocks:
