@@ -1859,6 +1859,13 @@ def _tool_match_confidence(
     if not t:
         return 0.0
 
+    parts = [part for part in t.split() if part]
+    if len(parts) >= 2:
+        # Multi-word named tools/standards require the complete phrase.
+        # Shared suffixes such as "DevOps" cannot prove "Azure DevOps".
+        candidate_blob = " ".join(entry.text for entry in entries if entry.text)
+        return 1.0 if _tool_text_hit(t, candidate_blob) else 0.0
+
     confs: List[float] = []
     confs.append(_match_confidence_string(t, cand_phrases, cand_compacts, entries))
 
@@ -1873,12 +1880,6 @@ def _tool_match_confidence(
             last = core_parts[-1]
             if _is_strong_alias_token(last):
                 confs.append(_match_confidence_string(last, cand_phrases, cand_compacts, entries))
-
-    parts = [p for p in t.split() if p]
-    if len(parts) >= 2:
-        last = parts[-1]
-        if _is_strong_alias_token(last):
-            confs.append(_match_confidence_string(last, cand_phrases, cand_compacts, entries))
 
     return _clamp01(_noisy_or(confs))
 
@@ -2724,12 +2725,10 @@ def score_ir_v3(
     )
     if semantic_match_available and semantic_recommendation_valid:
         should_apply = cast(ShouldApply, model_should_apply)
-        if should_apply == "Yes":
-            final_score = max(70, min(92, int(final_score)))
-        elif should_apply == "Maybe":
-            final_score = max(45, min(69, int(final_score)))
-        else:
-            final_score = min(44, int(final_score))
+    # Recommendation and score answer different product questions. The model
+    # may say a stretch role is worth applying for, but it must never rewrite
+    # requirement coverage or break the deterministic seniority cap.
+    final_score = min(int(final_score), int(cap))
 
     risk_text = "" if risk_level in ("none", "low") else f" Risk: {risk_level} (missing {len(must_missing_names)} must)."
     extra_seniority_text = " (overqualified)" if bucket == "overqualified" else ""
@@ -3464,7 +3463,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "2.4"},
+        "contract": {"name": "kairos_v3_public", "version": "2.5"},
         "decision": decision,
         "score": score,
         "analysis_quality": {

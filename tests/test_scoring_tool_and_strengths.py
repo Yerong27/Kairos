@@ -62,3 +62,34 @@ def test_version_control_in_strengths():
             domain_items = s.get("items", [])
             break
     assert "Version Control" in domain_items
+
+
+def test_multiword_named_tool_requires_the_complete_phrase():
+    domains = [
+        DomainRequirement(
+            name="CI/CD Delivery",
+            importance="should",
+            evidence_quote="Build pipelines using Azure DevOps",
+            evidence_level="exact",
+            examples=[
+                ToolEvidence(
+                    name="Azure DevOps",
+                    importance="should",
+                    evidence_quote="Build pipelines using Azure DevOps",
+                )
+            ],
+        )
+    ]
+    ir = _make_ir(domains)
+
+    aws_only = score_ir_v3(
+        ir,
+        candidate_text="AWS Certified DevOps Engineer with cloud delivery experience.",
+    )
+    exact_tool = score_ir_v3(
+        ir,
+        candidate_text="Built and maintained deployment pipelines using Azure DevOps.",
+    )
+
+    assert aws_only.debug_breakdown.per_tool_should["Azure DevOps"] == "missing"
+    assert exact_tool.debug_breakdown.per_tool_should["Azure DevOps"] == "hit"

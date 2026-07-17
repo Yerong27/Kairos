@@ -1097,6 +1097,8 @@ def _extract_with_gemini_v3(
     except Exception as exc:
         raise ValueError(f"Invalid Candidate Profile: {exc}") from exc
     candidate_profile_summary = {
+        "candidate_seniority_signal": prompt_profile.candidate_seniority_signal,
+        "seniority_reason": prompt_profile.seniority_reason,
         "evidence_claims": [
             {
                 "evidence_id": claim.evidence_id,
@@ -1163,6 +1165,11 @@ GLOBAL RULES:
    - Never treat the same broad label across unrelated professional contexts
      as equivalent; regulated or compliance evidence must concern the same
      professional/regulatory domain.
+   - For a requirement containing multiple material components joined by AND,
+     `matched` requires evidence for every component. If only a subset is
+     supported, use `partial`.
+   - Do not infer a specialized environment, regulated context, scale, or
+     responsibility merely from an adjacent industry or broad job title.
 
 5) SHOULD APPLY:
    - Make the same holistic recommendation a strong career adviser would make.
@@ -1173,6 +1180,12 @@ GLOBAL RULES:
    - A missing resume phrase does not prove the candidate cannot do something.
    - Responsibilities are not hard blockers merely because they appear in the
      job description.
+   - "Yes" means the role is worth applying for; it does not mean a high
+     interview probability or a near-perfect match.
+   - Calibrate the language. Do not say "exceptional", "ideal", or equivalent
+     when any MUST requirement is partial/missing or when the candidate
+     seniority signal is materially below the job seniority signal. Describe
+     such a role as transferable, stretch, or reach as appropriate.
 
 6) COUNT & COVERAGE:
    - Prefer complete decision coverage over a fixed output count.
@@ -1272,7 +1285,7 @@ OUTPUT LANGUAGE: {output_language}
         # Gemini 3.5 Flash may use part of this budget for reasoning before
         # emitting the structured JSON. Keep enough headroom to avoid a
         # truncated or empty response on requirement-heavy JDs.
-        max_output_tokens=12288,
+        max_output_tokens=16384,
         response_mime_type="application/json",
     )
 

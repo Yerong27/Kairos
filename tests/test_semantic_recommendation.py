@@ -63,9 +63,46 @@ def test_semantic_comparison_controls_transferability_and_apply_recommendation()
     assert contract["decision"]["verdict"] == "Yes"
     assert contract["decision"]["reason"] == "semantic_candidate_assessment"
     assert "Strong adjacent cloud experience" in contract["decision"]["explanation"]
-    assert 70 <= contract["score"]["final_score"] <= 92
+    assert contract["score"]["final_score"] == 60
+    assert contract["score"]["final_score"] <= contract["score"]["cap"]
     assert contract["score"]["summary"].startswith("Strong adjacent cloud experience")
     assert contract["analysis_quality"]["matcher_mode"] == "semantic_profile_comparison"
+
+
+def test_semantic_yes_never_breaks_a_seniority_cap():
+    claim = CandidateEvidenceClaim(
+        evidence_id="ev_cloud",
+        resume_quote="Delivered reliable AWS infrastructure using Terraform.",
+    )
+    ir = AnalyzeIRv3(
+        job_title="Senior Cloud Engineer",
+        company="Example",
+        job_seniority_signal="senior",
+        candidate_seniority_signal="junior_to_mid",
+        candidate_evidence_claims=[claim],
+        domain_requirements=[
+            DomainRequirement(
+                name="Cloud Infrastructure",
+                importance="must",
+                evidence_quote="Deliver reliable cloud infrastructure",
+                evidence_level="exact",
+                evidence_status="verified",
+                match_status="matched",
+                resume_evidence_ids=["ev_cloud"],
+            )
+        ],
+        application_recommendation=ApplicationRecommendation(
+            should_apply="Yes",
+            confidence="medium",
+            rationale="A worthwhile stretch opportunity.",
+        ),
+    )
+
+    contract = score_to_public_dict(score_ir_v3(ir))
+
+    assert contract["decision"]["verdict"] == "Yes"
+    assert contract["score"]["seniority_gap"] == "medium"
+    assert contract["score"]["final_score"] <= contract["score"]["cap"]
 
 
 def test_reversed_or_choices_collapse_to_one_requirement():

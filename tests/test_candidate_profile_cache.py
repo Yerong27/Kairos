@@ -314,6 +314,9 @@ def test_jd_gemini_prompt_uses_compact_cached_profile_not_raw_resume():
 
     assert "<candidate_profile>" in captured["prompt"]
     assert "Built production services with Python." in captured["prompt"]
+    assert "candidate_seniority_signal" in captured["prompt"]
+    assert "every component" in captured["prompt"]
+    assert "worth applying for" in captured["prompt"]
     assert "raw_llm_json" not in captured["prompt"]
     assert "PRIVATE FULL RESUME" not in captured["prompt"]
 
