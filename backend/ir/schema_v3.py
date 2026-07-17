@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import AliasChoices, BaseModel, Field, ConfigDict, field_validator
 from backend.ir.candidate_profile import CandidateEvidenceClaim
 
 
@@ -54,7 +54,10 @@ class ToolEvidence(BaseModel):
 
     name: str = Field(alias="tool", description="Name of the tool/skill example (e.g. 'Python', 'Jira')")
     importance: Importance
-    evidence_quote: Optional[str] = None
+    evidence_quote: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("jd_evidence_quote", "evidence_quote"),
+    )
 
     # Internal / Optional
     cost: Optional[str] = None
@@ -82,7 +85,10 @@ class DomainRequirement(BaseModel):
     # Phase 3: Canonical ID & Evidence Protocol
     domain_id: Optional[str] = Field(default=None, description="Canonical Domain ID from Catalog")
 
-    evidence_quote: Optional[str] = None
+    evidence_quote: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("jd_evidence_quote", "evidence_quote"),
+    )
     evidence_summary: Optional[str] = Field(default=None, description="Concise summary of the full requirement context")
     examples: List[ToolEvidence] = Field(default_factory=list, description="Concrete tools or examples")
 

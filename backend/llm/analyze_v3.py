@@ -1010,7 +1010,9 @@ GLOBAL RULES:
 
 7) EVIDENCE:
    - **evidence_summary**: Summarize the requirement context (1 sentence) for human understanding.
-   - **evidence_quote**: Verbatim quote from the text.
+   - **jd_evidence_quote**: Verbatim substring copied ONLY from `job_text`.
+   - Never put a resume quote in `jd_evidence_quote`. Resume support is
+     represented ONLY by `resume_evidence_ids`.
 
 8) SENIORITY RUBRIC (Apply Universally):
    Use these BEHAVIORAL markers to determine `job_seniority_signal`, regardless of tech stack:
@@ -1054,12 +1056,12 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
       "resume_evidence_ids": ["exact evidence_id from candidate_profile"],
       "match_reason": "one concise candidate-specific reason",
       "evidence_summary": "string",
-      "evidence_quote": "string",
+      "jd_evidence_quote": "verbatim substring copied from job_text only",
       "examples": [
         {{
           "tool": "string",
           "importance": "must|should|nice_to_have",
-          "evidence_quote": "string"
+          "jd_evidence_quote": "verbatim substring copied from job_text only"
         }}
       ]
     }}
@@ -1113,6 +1115,20 @@ OUTPUT LANGUAGE: {output_language}
         )
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
+        jd_text_normalized = _normalize_whitespace(page_text).lower()
+        invalid_jd_evidence = [
+            requirement.name
+            for requirement in parsed_ir.domain_requirements
+            if not _validate_quote(
+                str(requirement.evidence_quote or ""),
+                jd_text_normalized,
+            )
+        ]
+        if invalid_jd_evidence:
+            raise ValueError(
+                "Gemini returned requirement evidence that was not copied from the JD: "
+                + ", ".join(invalid_jd_evidence[:5])
+            )
         valid_candidate_ids = {
             item["evidence_id"]
             for item in candidate_profile_summary["evidence_claims"]
@@ -2500,6 +2516,13 @@ def analyze_v3(
             x.name.lower(),
         )
     )
+    raw_requirement_count = len(raw_domains)
+    verified_requirement_count = len(domain_requirements)
+    minimum_retained = max(1, (raw_requirement_count * 3 + 3) // 4)
+    normalization_incomplete = bool(
+        raw_requirement_count
+        and verified_requirement_count < minimum_retained
+    )
     evidence_hints = job.get("evidence_hints") or raw.get("evidence_hints") or {}
     if not isinstance(evidence_hints, dict):
         evidence_hints = {}
@@ -2538,6 +2561,13 @@ def analyze_v3(
 
         # helpful: anchors stats to validate 方案B 稳定性
         raw["_debug_meta"]["anchors_per_domain"] = {d.name: (d.anchors or []) for d in domain_requirements}
+        raw["_debug_meta"]["raw_requirement_count"] = raw_requirement_count
+        raw["_debug_meta"]["verified_requirement_count"] = verified_requirement_count
+        raw["_debug_meta"]["requirement_retention_ratio"] = round(
+            verified_requirement_count / float(raw_requirement_count),
+            3,
+        ) if raw_requirement_count else 0.0
+        raw["_debug_meta"]["normalization_incomplete"] = normalization_incomplete
     except Exception:
         pass
 
@@ -2561,7 +2591,11 @@ def analyze_v3(
         application_recommendation=application_recommendation,
         evidence_hints=evidence_hints,
         raw_llm_json=raw,
-        analysis_status="success" if domain_requirements else "degraded",
+        analysis_status=(
+            "success"
+            if domain_requirements and not normalization_incomplete
+            else "degraded"
+        ),
         model_used=JOB_ANALYSIS_MODEL,
     )
 

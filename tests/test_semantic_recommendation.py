@@ -150,3 +150,57 @@ def test_normalization_does_not_truncate_complete_requirement_set_to_fourteen():
         )
 
     assert len(result.domain_requirements) == 16
+
+
+def test_jd_evidence_quote_alias_is_kept_separate_from_resume_evidence():
+    requirement = DomainRequirement.model_validate(
+        {
+            "domain": "Infrastructure as Code",
+            "importance": "must",
+            "jd_evidence_quote": "Experience with Infrastructure as Code",
+            "match_status": "partial",
+            "resume_evidence_ids": ["ev_iac"],
+        }
+    )
+
+    assert requirement.evidence_quote == "Experience with Infrastructure as Code"
+    assert requirement.resume_evidence_ids == ["ev_iac"]
+
+
+def test_large_requirement_loss_marks_analysis_degraded():
+    valid_clauses = [f"Capability {index} is required" for index in range(1, 6)]
+    page_text = "Requirements: " + ". ".join(valid_clauses) + "."
+    raw = {
+        "job_title": "Generalist",
+        "company": "Example",
+        "job_seniority_signal": "mid",
+        "domain_requirements": [
+            {
+                "name": f"Capability {index}",
+                "importance": "must",
+                "requirement_type": "capability",
+                "evidence_quote": (
+                    f"Capability {index} is required"
+                    if index <= 5
+                    else f"This quote is not in the JD {index}"
+                ),
+                "match_status": "missing",
+                "resume_evidence_ids": [],
+                "match_reason": "No evidence in the stored profile.",
+            }
+            for index in range(1, 9)
+        ],
+    }
+
+    with patch.object(analyzer, "_extract_with_gemini_v3", return_value=raw):
+        result = analyzer.analyze_v3(
+            page_text=page_text,
+            title="Generalist",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    assert len(result.domain_requirements) == 5
+    assert result.analysis_status == "degraded"
+    assert result.raw_llm_json["_debug_meta"]["normalization_incomplete"] is True
+    contract = score_to_public_dict(score_ir_v3(result))
+    assert contract["analysis_quality"]["score_reliable"] is False

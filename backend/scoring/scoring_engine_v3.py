@@ -2283,7 +2283,10 @@ def score_ir_v3(
     ]
     raw_domains_total = len(domains_raw or [])
     core_total_all = len(scored_core_domains)
-    signal_insufficient = (core_total_all == 0)
+    signal_insufficient = (
+        core_total_all == 0
+        or str(_get_field(job_ir, "analysis_status", "success") or "success") == "degraded"
+    )
     core_domains_filtered = [d for d in scored_core_domains if _is_core_domain(d)]
     core_domains_demoted = [d for d in scored_core_domains if d not in core_domains_filtered]
 
@@ -3432,7 +3435,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "2.1"},
+        "contract": {"name": "kairos_v3_public", "version": "2.2"},
         "decision": decision,
         "score": score,
         "analysis_quality": {
