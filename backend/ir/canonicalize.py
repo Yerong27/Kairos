@@ -27,6 +27,14 @@ _TOOL_ALIASES: Dict[str, str] = {
     "gpt-4": "GPT-4",
     "google gemini": "Gemini",
     "gemini": "Gemini",
+    "rdbms": "Relational Databases",
+    "relational": "Relational Databases",
+    "relational database": "Relational Databases",
+    "relational databases": "Relational Databases",
+    "relational database management system": "Relational Databases",
+    "relational database management systems": "Relational Databases",
+    "nosql database": "NoSQL Databases",
+    "nosql databases": "NoSQL Databases",
 }
 
 

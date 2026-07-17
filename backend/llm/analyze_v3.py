@@ -135,6 +135,10 @@ _JD_TOOL_IGNORE = {
     "llms",
     "agentic system",
     "agentic systems",
+    # File/data formats alone are weak hiring signals and create noisy
+    # "missing skill" output when a JD merely lists configuration examples.
+    "yaml",
+    "json",
 }
 
 
@@ -161,6 +165,14 @@ _JD_TOOL_ALIAS_MAP = {
     "fastapi/fastmcp": ["FastAPI", "FastMCP"],
     "react + typescript": ["React", "TypeScript"],
     "react+typescript": ["React", "TypeScript"],
+    "rdbms": ["Relational Databases"],
+    "relational": ["Relational Databases"],
+    "relational database": ["Relational Databases"],
+    "relational databases": ["Relational Databases"],
+    "relational database management system": ["Relational Databases"],
+    "relational database management systems": ["Relational Databases"],
+    "nosql database": ["NoSQL Databases"],
+    "nosql databases": ["NoSQL Databases"],
 }
 
 
@@ -174,7 +186,11 @@ def _normalize_tool_token(tok: str) -> List[str]:
     t = re.sub(r"^(?:such as|including|for example)\s+", "", t, flags=re.IGNORECASE).strip()
     if not t or "?" in t:
         return []
-    if re.match(r"^(?:and|or|but|are you|you will|you are|we are|the role)\b", t, re.IGNORECASE):
+    if re.match(
+        r"^(?:and|or|but|are you|you will|you are|we are|the role|learn|work|build|develop)\b",
+        t,
+        re.IGNORECASE,
+    ):
         return []
     if len(t) > 64 or len(t.split()) > 6:
         return []
@@ -199,6 +215,7 @@ def extract_tools_from_jd(page_text: str) -> List[str]:
         c = (chunk or "").strip()
         if not c:
             return []
+        c = re.sub(r"^(?:and|or)\s+", "", c, flags=re.IGNORECASE).strip()
         full_key = c.lower()
         full_key = re.sub(r"\s*/\s*", "/", full_key)
         full_key = re.sub(r"\s+", " ", full_key).strip()
@@ -236,7 +253,18 @@ def extract_tools_from_jd(page_text: str) -> List[str]:
     for ln in page_text.splitlines():
         low = ln.lower()
         if "such as" in low:
-            _, _, tail = ln.partition("such as")
+            such_as_pos = low.find("such as")
+            lead = low[:such_as_pos]
+            # "Concepts such as virtualization..." is useful JD context, but
+            # those nouns are not necessarily tools. Only parse examples when
+            # the sentence explicitly introduces a technical/tool category.
+            if not re.search(
+                r"\b(tool|technology|technologies|language|framework|platform|database|"
+                r"infrastructure as code|configuration technolog)",
+                lead,
+            ):
+                continue
+            tail = ln[such_as_pos + len("such as") :]
             if tail:
                 parts = [p.strip() for p in tail.split(",") if p.strip()]
                 for p in parts:

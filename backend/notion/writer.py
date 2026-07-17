@@ -291,6 +291,75 @@ def _split_strengths(public_contract: Dict[str, Any]) -> Tuple[List[str], List[s
     return _dedupe_keep_order(domains), _dedupe_keep_order(tools), _dedupe_keep_order(others)
 
 
+def _compact_tool_match_items(public_contract: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Return one clean, de-duplicated tool summary for the user-facing page."""
+    aliases = {
+        "rdbms": "Relational Databases",
+        "relational": "Relational Databases",
+        "relational database": "Relational Databases",
+        "relational databases": "Relational Databases",
+        "relational database management system": "Relational Databases",
+        "relational database management systems": "Relational Databases",
+        "nosql database": "NoSQL Databases",
+        "nosql databases": "NoSQL Databases",
+    }
+    # These are noisy when extracted from generic example/concept lists. More
+    # specific tools such as Docker, Kubernetes, Ansible, or Terraform remain.
+    hidden = {
+        "yaml",
+        "json",
+        "container",
+        "containers",
+        "virtualization",
+        "configuration management",
+        "source management",
+        "application deployment",
+    }
+    status_rank = {"missing": 1, "partial": 2, "matched": 3}
+    by_name: Dict[str, Tuple[str, str]] = {}
+
+    items = _as_list(_get_in(public_contract, ["tools", "items"], []))
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_name = _safe_str(item.get("name", "")).strip()
+        raw_key = raw_name.lower()
+        if not raw_name or raw_key in hidden:
+            continue
+        name = aliases.get(raw_key, raw_name)
+        status = _safe_str(item.get("status", "missing")).strip().lower()
+        if status not in status_rank:
+            status = "missing"
+        key = name.lower()
+        previous = by_name.get(key)
+        if previous is None or status_rank[status] > status_rank[previous[1]]:
+            by_name[key] = (name, status)
+
+    matched = [name for name, status in by_name.values() if status in ("matched", "partial")]
+    not_shown = [name for name, status in by_name.values() if status == "missing"]
+    return _dedupe_keep_order(matched), _dedupe_keep_order(not_shown)
+
+
+def _render_tool_match_to_notion(public_contract: Dict[str, Any]) -> List[dict]:
+    matched, not_shown = _compact_tool_match_items(public_contract)
+    if not matched and not not_shown:
+        return []
+
+    blocks = [_notion_heading("🧰 Tool Match", level=2)]
+    if matched:
+        blocks.extend(_notion_bullets("✅ Matched", matched, heading_level=3, max_items=12))
+    if not_shown:
+        blocks.extend(
+            _notion_bullets(
+                "⚠️ Not shown in resume",
+                not_shown,
+                heading_level=3,
+                max_items=8,
+            )
+        )
+    return blocks
+
+
 def _infer_layer_gaps(layer: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     meta = layer.get("meta")
     if not isinstance(meta, dict):
@@ -803,83 +872,13 @@ def create_notion_page(
     # actions. The requirement evidence matrix remains available internally
     # for scoring/debugging but is intentionally not rendered into Notion.
     if isinstance(public_contract, dict):
-        display_required = _as_list(public_contract.get("display_required_domains") or [])
-        display_evidence = public_contract.get("display_domain_evidence") or {}
-        tools_in_jd = _as_list(public_contract.get("tools_in_jd") or [])
-        missing_tools = set(_as_list(public_contract.get("missing_tools") or []))
-        tool_labels = public_contract.get("missing_tools_labels") or {}
-
-        if display_required:
-            blocks.append(_notion_heading("📌 Extracted Domains", level=2))
-            for d in display_required[:25]:
-                tag = str(display_evidence.get(d, "unknown")).upper()
-                blocks.append(
-                    {
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {"rich_text": _notion_rich_text(f"{d} — {tag}")},
-                    }
-                )
-            blocks.append(_notion_divider())
-
-        if tools_in_jd:
-            stop_words = {
-                "tool",
-                "tools",
-                "tooling",
-                "platform",
-                "platforms",
-                "experience",
-                "framework",
-                "frameworks",
-                "technology",
-                "technologies",
-                "solution",
-                "solutions",
-                "stack",
-                "planning",
-            }
-            filtered_tools = [t for t in tools_in_jd if _safe_str(t).strip().lower() not in stop_words]
-            must_tools: List[str] = []
-            should_tools: List[str] = []
-            nice_tools: List[str] = []
-            for t in filtered_tools:
-                label = _safe_str(tool_labels.get(t, "")).lower()
-                if label == "must":
-                    must_tools.append(t)
-                elif label == "nice_to_have":
-                    nice_tools.append(t)
-                else:
-                    should_tools.append(t)
-
-            blocks.append(_notion_heading("🧰 Extracted Tools (JD)", level=2))
-            blocks.append(
-                _notion_paragraph(
-                    "Scoring uses only verified & matched tools. This list is raw JD mentions."
-                )
-            )
-            if must_tools:
-                blocks.extend(_notion_bullets("[must]", must_tools, heading_level=3, max_items=30))
-            if should_tools:
-                blocks.extend(_notion_bullets("[should]", should_tools, heading_level=3, max_items=30))
-            if nice_tools:
-                blocks.append(
-                    {
-                        "object": "block",
-                        "type": "toggle",
-                        "toggle": {
-                            "rich_text": _notion_rich_text("[nice-to-have]"),
-                            "children": _notion_bullets("", nice_tools, heading_level=3, max_items=30),
-                        },
-                    }
-                )
-            blocks.append(_notion_divider())
-
         blocks.extend(_render_missing_to_notion(public_contract))
         blocks.append(_notion_divider())
 
         strengths = _as_list(_get_in(public_contract, ["strengths"], []))
         missing_all = _as_list(_get_in(public_contract, ["missing", "all"], []))
+        display_required = _as_list(public_contract.get("display_required_domains") or [])
+        display_evidence = public_contract.get("display_domain_evidence") or {}
 
         if (not strengths or all(not s.get("items") for s in strengths if isinstance(s, dict))) and not missing_all:
             if display_required:
@@ -931,13 +930,14 @@ def create_notion_page(
         blocks.append(_notion_heading("💪 Strengths", level=2))
         if domains_s:
             blocks.extend(_notion_bullets("Domains", domains_s, heading_level=3, max_items=30))
-        if tools_s:
-            blocks.extend(_notion_bullets("Tools", tools_s, heading_level=3, max_items=30))
         if other_s:
             blocks.extend(_notion_bullets("Other", other_s, heading_level=3, max_items=30))
         blocks.append(_notion_divider())
 
-        blocks.extend(_render_layers_to_notion(public_contract))
+        tool_blocks = _render_tool_match_to_notion(public_contract)
+        if tool_blocks:
+            blocks.extend(tool_blocks)
+            blocks.append(_notion_divider())
 
         dc_blocks = _render_decision_constraints_to_notion(public_contract, resp)
         if dc_blocks:

@@ -133,14 +133,32 @@ def test_jd_tool_extraction_drops_sentence_fragments_and_questions():
 
     tools = analyzer.extract_tools_from_jd(page_text)
 
-    assert "virtualization" in tools
-    assert "containers" in tools
-    assert "YAML" in tools
-    assert "JSON" in tools
+    assert "virtualization" not in tools
+    assert "containers" not in tools
+    assert "YAML" not in tools
+    assert "JSON" not in tools
+    assert "learn quickly" not in [tool.lower() for tool in tools]
     assert "?" not in tools
     assert "are you experienced in?" not in [tool.lower() for tool in tools]
     assert not any("wide range of technology" in tool.lower() for tool in tools)
     assert not any(tool.lower().startswith("and ") for tool in tools)
+
+
+def test_jd_tool_extraction_deduplicates_databases_and_drops_low_signal_concepts():
+    page_text = """Infrastructure as code and configuration technologies such as YAML, JSON, Ansible, CloudFormation or Terraform.
+    Exposure to concepts such as virtualization, containers, configuration management, and application deployment.
+    Experience with Relational Database Management Systems (RDBMS), and NoSQL databases."""
+
+    tools = analyzer.extract_tools_from_jd(page_text)
+
+    assert "Ansible" in tools
+    assert "CloudFormation or Terraform" in tools
+    assert tools.count("Relational Databases") == 1
+    assert tools.count("NoSQL Databases") == 1
+    assert "YAML" not in tools
+    assert "JSON" not in tools
+    assert "virtualization" not in tools
+    assert "containers" not in tools
 
 
 def test_one_level_more_experienced_is_not_labeled_overqualified():
@@ -240,5 +258,9 @@ def test_notion_uses_user_facing_summary_without_evidence_matrix():
     assert "Observability" in serialized
     assert "⚠️ Gaps (recommended)" in serialized
     assert "💪 Strengths" in serialized
+    assert "🧰 Tool Match" in serialized
+    assert "⚠️ Not shown in resume" in serialized
+    assert "Extracted Tools (JD)" not in serialized
+    assert "Layered Breakdown" not in serialized
     assert "🔒 Decision Constraints" in serialized
     assert "Your level: junior" in serialized
