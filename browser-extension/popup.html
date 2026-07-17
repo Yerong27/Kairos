@@ -1,44 +1,73 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kairos Job Agent</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <div class="section">
-      <div class="title">Step 1 — Connect Notion</div>
-      <div id="notion-status">Checking...</div>
-      <div id="db-name" class="muted"></div>
-      <div class="row">
-        <button id="connect-btn">Connect Notion</button>
-        <button id="change-db-btn">Change database</button>
+    <header class="brand">
+      <div class="brand-mark" aria-hidden="true">K</div>
+      <div>
+        <h1>Kairos</h1>
+        <p>Decide where your time is best spent.</p>
       </div>
-      <div id="notion-msg" class="muted"></div>
-    </div>
+      <span class="local-badge">Local</span>
+    </header>
 
-    <div class="section" id="resume-section">
-      <div class="title">Step 2 — Upload Resume (once)</div>
-      <div id="resume-status">Checking...</div>
-      <div id="resume-meta" class="muted"></div>
-      <div class="row file-row">
+    <main>
+      <section class="card" id="notion-section">
+        <div class="card-heading">
+          <span class="step">1</span>
+          <div><h2>Connect Notion</h2><p>Your analysis destination</p></div>
+        </div>
+        <div class="status-panel">
+          <span id="notion-dot" class="status-dot"></span>
+          <div class="status-copy">
+            <strong id="notion-status">Checking connection…</strong>
+            <span id="db-name"></span>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="connect-btn" class="button primary">Connect Notion</button>
+          <button id="change-db-btn" class="button secondary hidden">Change database</button>
+        </div>
+        <div id="notion-msg" class="message" aria-live="polite"></div>
+      </section>
+
+      <section class="card" id="resume-section">
+        <div class="card-heading">
+          <span class="step">2</span>
+          <div><h2>Upload resume</h2><p>Only when your resume changes</p></div>
+        </div>
+        <div class="status-panel">
+          <span id="resume-dot" class="status-dot"></span>
+          <div class="status-copy">
+            <strong id="resume-status">Checking resume…</strong>
+            <span id="resume-meta"></span>
+          </div>
+        </div>
         <input type="file" id="resume-file" accept=".txt,.pdf" class="file-input" />
-        <button id="choose-file-btn" type="button">Choose file</button>
-        <div id="file-name" class="muted file-name">No file selected</div>
-        <button id="upload-btn" type="button">Upload</button>
-      </div>
-      <div id="upload-msg" class="muted"></div>
-      <div class="row">
-        <button id="open-upload-btn">Open upload page</button>
-      </div>
-    </div>
+        <div class="file-picker">
+          <button id="choose-file-btn" class="button secondary" type="button">Choose file</button>
+          <span id="file-name" class="file-name">PDF or TXT</span>
+        </div>
+        <button id="upload-btn" class="button primary full-width" type="button">Upload resume</button>
+        <div id="upload-msg" class="message" aria-live="polite"></div>
+      </section>
 
-    <div class="section" id="analyze-section">
-      <div class="title">Step 3 — Analyze This Page</div>
-      <button id="analyze-btn">Analyze this page</button>
-      <div id="analyze-msg" class="muted"></div>
-    </div>
+      <section class="card analyze-card" id="analyze-section">
+        <div class="card-heading">
+          <span class="step">3</span>
+          <div><h2>Analyze this job</h2><p>Open a LinkedIn job, then run Kairos</p></div>
+        </div>
+        <button id="analyze-btn" class="button analyze-button">Analyze this page <span aria-hidden="true">→</span></button>
+        <div id="analyze-msg" class="message" aria-live="polite"></div>
+      </section>
+    </main>
 
+    <footer><span class="footer-dot"></span> Local-first · Backend runs on this device</footer>
     <script src="popup.js"></script>
   </body>
 </html>

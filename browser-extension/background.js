@@ -93,13 +93,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-  if (msg && msg.type === "OPEN_UPLOAD_PAGE") {
-    const url = chrome.runtime.getURL("upload.html");
-    chrome.tabs.create({ url });
-    sendResponse({ ok: true });
-    return true;
-  }
-
   if (msg && msg.type === "ANALYZE_CURRENT_TAB") {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs && tabs[0];
