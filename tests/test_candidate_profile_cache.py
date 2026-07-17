@@ -71,7 +71,8 @@ def test_resume_parser_keeps_only_resume_grounded_claims():
     ]
     assert "Python" in profile.candidate_skills
     assert "Kubernetes" not in profile.candidate_skills
-    assert profile.candidate_seniority_signal == "junior_to_mid"
+    assert profile.candidate_seniority_signal == "unknown"
+    assert profile.seniority_reason == "deferred_to_job_family_analysis"
 
 
 def test_resume_parser_retries_truncated_json_with_compact_prompt():
@@ -175,6 +176,49 @@ def test_resume_profile_is_reused_until_resume_content_changes():
             record = main._get_candidate_profile_record("user")
             assert record["resume_hash"] == user["resume_hash"]
             assert '"Go"' in record["profile_json"]
+
+
+def test_same_resume_is_reparsed_when_candidate_profile_logic_version_changes():
+    client = TestClient(main.app)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with patch.object(main, "NOTION_OAUTH_DB", db_path), patch.object(
+            main, "kairos_analyze_resume", return_value=_profile("Python")
+        ) as parser:
+            main._store_notion_user(
+                user_token="user",
+                access_token="notion-token",
+                database_id="database",
+                database_name="Jobs",
+            )
+            headers = {"Authorization": "Bearer user"}
+            resume = b"Built production services with Python."
+
+            first = client.post(
+                "/resume/upload",
+                files={"file": ("resume.txt", resume, "text/plain")},
+                headers=headers,
+            )
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE candidate_profiles SET prompt_version = ? WHERE user_token = ?",
+                    ("old-parser-version", "user"),
+                )
+                conn.commit()
+            after_upgrade = client.post(
+                "/resume/upload",
+                files={"file": ("resume.txt", resume, "text/plain")},
+                headers=headers,
+            )
+
+            assert first.status_code == after_upgrade.status_code == 200
+            assert first.json()["candidate_profile_reused"] is False
+            assert after_upgrade.json()["resume_changed"] is False
+            assert after_upgrade.json()["candidate_profile_reused"] is False
+            assert parser.call_count == 2
+            assert main._get_candidate_profile_record("user")["prompt_version"] == (
+                main.CANDIDATE_PROFILE_PROMPT_VERSION
+            )
 
 
 def test_reconnecting_notion_preserves_resume_and_candidate_profile():

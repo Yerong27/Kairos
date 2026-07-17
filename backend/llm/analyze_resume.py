@@ -12,11 +12,8 @@ from google.generativeai.types import GenerationConfig
 
 from backend.ir.candidate_profile import CandidateEvidenceClaim, CandidateProfile, CandidateRole
 from backend.ir.canonicalize import canon_domain, canon_tool
-from backend.llm.analyze_v3 import _derive_candidate_level_from_experience, _norm_seniority_label
-
-
 CANDIDATE_PROFILE_SCHEMA_VERSION = "1.0"
-CANDIDATE_PROFILE_PROMPT_VERSION = "1.1"
+CANDIDATE_PROFILE_PROMPT_VERSION = "1.2"
 CANDIDATE_PROFILE_MODEL = (os.getenv("GEMINI_RESUME_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
 
 
@@ -71,7 +68,8 @@ STRICT RULES:
 4. candidate_skills may include tools and portable capabilities supported by a valid evidence claim.
 5. Return at most {claim_limit} evidence claims, {skill_limit} candidate skills, and {role_limit} roles.
 6. Return at most 8 skills and 4 domains per evidence claim.
-7. Keep seniority_reason under 160 characters.
+7. Do not assign one global seniority level. Seniority depends on the target job
+   family and is calculated locally when a job is analyzed.
 
 <resume>
 {text[:50000]}
@@ -81,8 +79,6 @@ OUTPUT JSON ONLY:
 {{
   "candidate_skills": ["string"],
   "candidate_domains": ["string"],
-  "candidate_seniority_signal": "intern|apprentice|junior|junior_to_mid|mid|senior|lead|unknown",
-  "seniority_reason": "short string",
   "evidence_claims": [
     {{
       "resume_quote": "short verbatim resume substring",
@@ -213,22 +209,14 @@ def analyze_resume(resume_text: str) -> CandidateProfile:
     if not claims and not candidate_skills:
         raise ValueError("Gemini returned no resume-grounded candidate evidence")
 
-    deterministic_level, deterministic_reason, _entries = _derive_candidate_level_from_experience(
-        text, job_family="general"
-    )
-    llm_level = _norm_seniority_label(raw.get("candidate_seniority_signal"))
-    seniority = deterministic_level or llm_level or "unknown"
-    reason = (
-        f"experience_inference:{deterministic_reason}"
-        if deterministic_level
-        else _normalize(raw.get("seniority_reason")) or "llm_resume_signal"
-    )
-
     return CandidateProfile(
         candidate_skills=candidate_skills,
         candidate_domains=candidate_domains,
-        candidate_seniority_signal=seniority,
-        seniority_reason=reason,
+        # A career changer does not have one meaningful global seniority.
+        # The job analyzer derives a role-family-specific level from the
+        # locally stored resume without sending it to Gemini again.
+        candidate_seniority_signal="unknown",
+        seniority_reason="deferred_to_job_family_analysis",
         evidence_claims=claims,
         roles=roles,
         analysis_status="ready",
