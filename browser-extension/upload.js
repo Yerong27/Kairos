@@ -24,7 +24,7 @@ uploadBtn.addEventListener("click", () => {
     return;
   }
   uploadBtn.disabled = true;
-  uploadBtn.textContent = "Uploading...";
+  uploadBtn.textContent = "Uploading and analyzing...";
 
   getToken((token) => {
     if (!token) {
@@ -47,7 +47,15 @@ uploadBtn.addEventListener("click", () => {
         return data;
       })
       .then((data) => {
-        uploadMsg.textContent = data && data.status === "saved" ? "Upload complete." : "Upload failed.";
+        if (!data || data.status !== "saved") {
+          uploadMsg.textContent = "Upload failed.";
+        } else if (data.candidate_profile_status === "ready") {
+          uploadMsg.textContent = data.candidate_profile_reused
+            ? "Upload complete. Existing Candidate Profile reused."
+            : "Upload complete. Candidate Profile created.";
+        } else {
+          uploadMsg.textContent = data.warning || "Resume saved, but Candidate Profile creation failed. Re-upload to retry.";
+        }
       })
       .catch((err) => {
         uploadMsg.textContent = err.message || "Upload failed.";

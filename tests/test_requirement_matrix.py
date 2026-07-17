@@ -42,7 +42,17 @@ def test_top_level_gemini_schema_survives_normalization():
         result = analyzer.analyze_v3(
             page_text=page_text,
             title="Software Engineer | Example | LinkedIn",
-            user_profile="Junior Software Engineer. Built REST APIs with Python.",
+            candidate_profile={
+                "candidate_skills": ["Python", "REST APIs"],
+                "candidate_seniority_signal": "junior",
+                "evidence_claims": [
+                    {
+                        "resume_quote": "Built REST APIs with Python.",
+                        "skills": ["Python", "REST APIs"],
+                        "domains": ["API Development"],
+                    }
+                ],
+            },
         )
 
     assert [d.name for d in result.domain_requirements] == ["API Development"]

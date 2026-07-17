@@ -35,10 +35,24 @@ load_dotenv(BASE_DIR / ".env")
 _V3_AVAILABLE = True
 try:
     from backend.llm.analyze_v3 import analyze_v3 as kairos_analyze_v3
+    from backend.llm.analyze_resume import (
+        CANDIDATE_PROFILE_MODEL,
+        CANDIDATE_PROFILE_PROMPT_VERSION,
+        CANDIDATE_PROFILE_SCHEMA_VERSION,
+        analyze_resume as kairos_analyze_resume,
+        candidate_profile_evidence_text,
+    )
+    from backend.ir.candidate_profile import CandidateProfile
     from backend.scoring.scoring_engine_v3 import score_ir_v3, score_to_public_dict
 except Exception:
     _V3_AVAILABLE = False
     kairos_analyze_v3 = None  # type: ignore
+    kairos_analyze_resume = None  # type: ignore
+    candidate_profile_evidence_text = None  # type: ignore
+    CandidateProfile = None  # type: ignore
+    CANDIDATE_PROFILE_MODEL = "unknown"
+    CANDIDATE_PROFILE_PROMPT_VERSION = "unknown"
+    CANDIDATE_PROFILE_SCHEMA_VERSION = "unknown"
     score_ir_v3 = None  # type: ignore
     score_to_public_dict = None  # type: ignore
 
@@ -202,7 +216,27 @@ def _init_notion_oauth_db() -> None:
                 created_at INTEGER,
                 resume_text TEXT,
                 resume_filename TEXT,
-                resume_uploaded_at INTEGER
+                resume_uploaded_at INTEGER,
+                resume_hash TEXT
+            )
+            """
+        )
+        user_columns = {row[1] for row in conn.execute("PRAGMA table_info(notion_users)").fetchall()}
+        if "resume_hash" not in user_columns:
+            conn.execute("ALTER TABLE notion_users ADD COLUMN resume_hash TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS candidate_profiles (
+                user_token TEXT PRIMARY KEY,
+                resume_hash TEXT NOT NULL,
+                profile_json TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                model TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -276,9 +310,13 @@ def _store_notion_user(
     with sqlite3.connect(NOTION_OAUTH_DB) as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO notion_users
+            INSERT INTO notion_users
             (user_token, access_token, database_id, database_name, created_at)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_token) DO UPDATE SET
+                access_token = excluded.access_token,
+                database_id = excluded.database_id,
+                database_name = excluded.database_name
             """,
             (user_token, access_token, database_id, database_name, int(time.time())),
         )
@@ -291,7 +329,7 @@ def _get_notion_user(user_token: str) -> Optional[Dict[str, Any]]:
         cur = conn.execute(
             """
             SELECT user_token, access_token, database_id, database_name,
-                   resume_text, resume_filename, resume_uploaded_at
+                   resume_text, resume_filename, resume_uploaded_at, resume_hash
             FROM notion_users WHERE user_token = ?
             """,
             (user_token,),
@@ -307,19 +345,105 @@ def _get_notion_user(user_token: str) -> Optional[Dict[str, Any]]:
             "resume_text": row[4],
             "resume_filename": row[5],
             "resume_uploaded_at": row[6],
+            "resume_hash": row[7],
         }
 
 
-def _store_resume_for_user(user_token: str, resume_text: str, filename: str) -> None:
+def _store_resume_for_user(user_token: str, resume_text: str, filename: str, resume_hash: str) -> bool:
+    """Store the latest resume and invalidate its profile only when content changed."""
     _init_notion_oauth_db()
     with sqlite3.connect(NOTION_OAUTH_DB) as conn:
+        row = conn.execute("SELECT resume_hash FROM notion_users WHERE user_token = ?", (user_token,)).fetchone()
+        previous_hash = row[0] if row else None
+        changed = previous_hash != resume_hash
         conn.execute(
             """
             UPDATE notion_users
-            SET resume_text = ?, resume_filename = ?, resume_uploaded_at = ?
+            SET resume_text = ?, resume_filename = ?, resume_uploaded_at = ?, resume_hash = ?
             WHERE user_token = ?
             """,
-            (resume_text, filename, int(time.time()), user_token),
+            (resume_text, filename, int(time.time()), resume_hash, user_token),
+        )
+        if changed:
+            conn.execute("DELETE FROM candidate_profiles WHERE user_token = ?", (user_token,))
+        conn.commit()
+        return changed
+
+
+def _get_candidate_profile_record(user_token: str) -> Optional[Dict[str, Any]]:
+    _init_notion_oauth_db()
+    with sqlite3.connect(NOTION_OAUTH_DB) as conn:
+        row = conn.execute(
+            """
+            SELECT resume_hash, profile_json, status, error, model,
+                   schema_version, prompt_version, created_at, updated_at
+            FROM candidate_profiles WHERE user_token = ?
+            """,
+            (user_token,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "resume_hash": row[0],
+        "profile_json": row[1],
+        "status": row[2],
+        "error": row[3],
+        "model": row[4],
+        "schema_version": row[5],
+        "prompt_version": row[6],
+        "created_at": row[7],
+        "updated_at": row[8],
+    }
+
+
+def _candidate_profile_record_is_current(record: Any, resume_hash: str) -> bool:
+    return bool(
+        isinstance(record, dict)
+        and record.get("status") == "ready"
+        and record.get("profile_json")
+        and record.get("resume_hash") == resume_hash
+        and record.get("model") == CANDIDATE_PROFILE_MODEL
+        and record.get("schema_version") == CANDIDATE_PROFILE_SCHEMA_VERSION
+        and record.get("prompt_version") == CANDIDATE_PROFILE_PROMPT_VERSION
+    )
+
+
+def _store_candidate_profile_record(
+    *, user_token: str, resume_hash: str, status: str, profile: Optional[Dict[str, Any]] = None, error: str = ""
+) -> None:
+    _init_notion_oauth_db()
+    now = int(time.time())
+    profile_json = json.dumps(profile, ensure_ascii=False) if isinstance(profile, dict) else None
+    with sqlite3.connect(NOTION_OAUTH_DB) as conn:
+        conn.execute(
+            """
+            INSERT INTO candidate_profiles
+            (user_token, resume_hash, profile_json, status, error, model,
+             schema_version, prompt_version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_token) DO UPDATE SET
+                resume_hash = excluded.resume_hash,
+                profile_json = excluded.profile_json,
+                status = excluded.status,
+                error = excluded.error,
+                model = excluded.model,
+                schema_version = excluded.schema_version,
+                prompt_version = excluded.prompt_version,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_token,
+                resume_hash,
+                profile_json,
+                status,
+                _clamp_text(error, 1200),
+                CANDIDATE_PROFILE_MODEL,
+                CANDIDATE_PROFILE_SCHEMA_VERSION,
+                CANDIDATE_PROFILE_PROMPT_VERSION,
+                now,
+                now,
+            ),
         )
         conn.commit()
 
@@ -812,6 +936,7 @@ def status(authorization: Optional[str] = Header(None)):
     user = _get_notion_user(user_token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid user token.")
+    profile_record = _get_candidate_profile_record(user_token)
     return {
         "notion_connected": True,
         "database_id": user.get("database_id"),
@@ -819,6 +944,10 @@ def status(authorization: Optional[str] = Header(None)):
         "resume_present": bool(user.get("resume_text")),
         "resume_filename": user.get("resume_filename"),
         "resume_uploaded_at": user.get("resume_uploaded_at"),
+        "candidate_profile_status": profile_record.get("status") if profile_record else "missing",
+        "candidate_profile_current": _candidate_profile_record_is_current(
+            profile_record, _safe_str(user.get("resume_hash"))
+        ),
     }
 
 
@@ -862,8 +991,65 @@ def upload_resume(file: UploadFile = File(...), authorization: Optional[str] = H
     if len(text) > MAX_RESUME_TEXT_CHARS:
         raise HTTPException(status_code=413, detail="Resume text is too large.")
 
-    _store_resume_for_user(user_token, text, filename)
-    return {"status": "saved", "resume_filename": filename, "resume_uploaded_at": int(time.time())}
+    resume_hash = _sha256_text("kairos_resume:1", text)
+    changed = _store_resume_for_user(user_token, text, filename, resume_hash)
+    existing = _get_candidate_profile_record(user_token)
+    if _candidate_profile_record_is_current(existing, resume_hash):
+        return {
+            "status": "saved",
+            "resume_filename": filename,
+            "resume_uploaded_at": int(time.time()),
+            "resume_changed": changed,
+            "candidate_profile_status": "ready",
+            "candidate_profile_reused": True,
+        }
+
+    if not _V3_AVAILABLE or kairos_analyze_resume is None:
+        detail = "Resume parser is unavailable. Check backend dependencies."
+        _store_candidate_profile_record(
+            user_token=user_token, resume_hash=resume_hash, status="error", error=detail
+        )
+        return {
+            "status": "saved",
+            "resume_filename": filename,
+            "resume_uploaded_at": int(time.time()),
+            "resume_changed": changed,
+            "candidate_profile_status": "error",
+            "candidate_profile_reused": False,
+            "warning": detail,
+        }
+
+    try:
+        profile = kairos_analyze_resume(text)  # type: ignore[misc]
+        profile_data = profile.model_dump() if hasattr(profile, "model_dump") else dict(profile)
+        _store_candidate_profile_record(
+            user_token=user_token,
+            resume_hash=resume_hash,
+            status="ready",
+            profile=profile_data,
+        )
+        return {
+            "status": "saved",
+            "resume_filename": filename,
+            "resume_uploaded_at": int(time.time()),
+            "resume_changed": changed,
+            "candidate_profile_status": "ready",
+            "candidate_profile_reused": False,
+        }
+    except Exception as exc:
+        detail = _clamp_text(str(exc), 500) or "Resume AI parsing failed."
+        _store_candidate_profile_record(
+            user_token=user_token, resume_hash=resume_hash, status="error", error=detail
+        )
+        return {
+            "status": "saved",
+            "resume_filename": filename,
+            "resume_uploaded_at": int(time.time()),
+            "resume_changed": changed,
+            "candidate_profile_status": "error",
+            "candidate_profile_reused": False,
+            "warning": "Resume was saved locally, but its AI profile could not be created. Re-upload to retry. " + detail,
+        }
 
 
 @app.post("/analyze_and_save", response_model=AnalyzeResponse)
@@ -892,15 +1078,35 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
         if use_v3:
             request_started = time.perf_counter()
             timings_ms: Dict[str, int] = {}
-            candidate_evidence_text = _extract_candidate_evidence_text(resume_text)
-            extra_tokens = _extract_explicit_skill_tokens(resume_text)
-            if extra_tokens:
-                candidate_evidence_text += "\n\nHeuristic skills tokens (tool bonus only): " + ", ".join(extra_tokens)
+            resume_hash = _safe_str(user.get("resume_hash")) or _sha256_text("kairos_resume:1", resume_text)
+            profile_record = _get_candidate_profile_record(user_token)
+            if not _candidate_profile_record_is_current(profile_record, resume_hash):
+                status_value = profile_record.get("status") if isinstance(profile_record, dict) else "missing"
+                error_value = profile_record.get("error") if isinstance(profile_record, dict) else ""
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Candidate Profile is {status_value}. Re-upload the resume to create or retry it."
+                        + (f" Reason: {_clamp_text(_safe_str(error_value), 400)}" if error_value else "")
+                    ),
+                )
+            try:
+                candidate_profile_data = json.loads(_safe_str(profile_record.get("profile_json")))
+                candidate_profile = CandidateProfile.model_validate(candidate_profile_data)  # type: ignore[union-attr]
+                candidate_evidence_text = candidate_profile_evidence_text(candidate_profile)  # type: ignore[misc]
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Stored Candidate Profile is invalid. Re-upload the resume. Reason: {_clamp_text(str(exc), 400)}",
+                ) from exc
 
             cache_key = _sha256_text(
-                "kairos_v3_public:1.4",
+                "kairos_v3_public:1.5",
                 _canonical_jd_for_cache(req.page_text or ""),
-                resume_text or "",
+                resume_hash,
+                CANDIDATE_PROFILE_MODEL,
+                CANDIDATE_PROFILE_SCHEMA_VERSION,
+                CANDIDATE_PROFILE_PROMPT_VERSION,
                 req.title or "",
                 req.output_language or "en",
             )
@@ -925,7 +1131,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 ir3 = kairos_analyze_v3(  # type: ignore[misc]
                     page_text=req.page_text,
                     title=req.title,
-                    user_profile=resume_text,
+                    candidate_profile=candidate_profile_data,
                     output_language=req.output_language or "en",
                 )
                 timings_ms["llm_and_normalization"] = int(round((time.perf_counter() - llm_started) * 1000))
@@ -975,7 +1181,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                         ir_meta = kairos_analyze_v3(  # type: ignore[misc]
                             page_text=req.page_text,
                             title=req.title,
-                            user_profile=resume_text,
+                            candidate_profile=candidate_profile_data,
                             output_language=req.output_language or "en",
                         )
                         if isinstance(api_data, dict):
@@ -1097,6 +1303,9 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                     "input": {
                         "jd_chars": len(req.page_text or ""),
                         "resume_chars": len(resume_text or ""),
+                        "resume_hash_prefix": resume_hash[:12],
+                        "candidate_profile_model": CANDIDATE_PROFILE_MODEL,
+                        "candidate_profile_schema_version": CANDIDATE_PROFILE_SCHEMA_VERSION,
                         "extraction": req.extraction_meta or {},
                     },
                     "score": api_data,

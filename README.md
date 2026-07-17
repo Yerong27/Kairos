@@ -1,93 +1,58 @@
 # Kairos AI Job Agent
 
-Kairos 是一个本地运行的求职匹配助手。它通过 Chrome extension 读取当前职位页面，结合你的简历，用 Gemini 提取职位要求并计算匹配度，最后把完整分析写入 Notion 数据库。
+> 中文说明在前，English documentation follows.
 
-## 日常使用：只看这一节就够了
+Kairos 是一个本地运行的求职匹配助手。Chrome extension 从当前 LinkedIn 职位页面提取结构化 JD；Gemini 分别解析简历和 JD；本地确定性评分器计算匹配度、seniority gap 和 `Should Apply?`；结果写入用户选择的 Notion 数据库。
 
-### 1. 启动后端
+## 核心设计
 
-打开 Terminal，执行：
-
-```bash
-cd Kairos
-source .venv/bin/activate
-uvicorn main:app --reload
-```
-
-看到类似下面的内容就表示启动成功：
+Kairos 将两个 AI 任务完全分开：
 
 ```text
-Uvicorn running on http://127.0.0.1:8000
+上传新简历
+  → Resume Parser（Gemini，仅在简历内容变化时调用）
+  → Candidate Profile（本地 SQLite）
+
+打开新职位
+  → JD Parser（Gemini，只接收 JD，不接收简历）
+  → Job Profile
+
+Candidate Profile + Job Profile
+  → 本地确定性评分
+  → Score / Missing / Should Apply?
+  → Notion
 ```
 
-不要关闭这个 Terminal 窗口。Kairos 使用期间，后端必须一直运行。
+- 相同简历即使改名后重新上传，也会根据内容 hash 复用 Candidate Profile。
+- 简历内容变化、Profile schema/prompt/model 变化时会重新解析。
+- 每个新 JD 仍需要一次 Gemini 请求。
+- 最终评分和 `Should Apply?` 不由 Gemini直接生成。
 
-可以打开 <http://127.0.0.1:8000/health> 检查状态。正常结果应包含：
+## 功能
 
-```json
-{"status":"operational","backend":"connected","v3_available":true}
-```
+- LinkedIn JSON-LD、Shadow DOM 和多级 selector 提取
+- 自动展开职位描述并过滤相关推荐、公司介绍等页面噪音
+- Resume 与 JD 使用独立 Gemini prompt、schema 和缓存生命周期
+- JD 要求必须附带可在原文验证的 evidence quote
+- MUST / SHOULD / NICE-TO-HAVE 要求分级
+- Match / Partial / Missing 的完整要求矩阵
+- 显式 JD 工具和 ATS 关键词覆盖
+- 年限、近期经历、职责和 ownership 融合的 seniority 判断
+- 确定性 score、score band 和 `Should Apply?`
+- Notion OAuth 和数据库选择
+- 不完整分析不缓存，也不写入 `Error (Degraded)` 页面
 
-### 2. 打开 Chrome extension
+## 快速开始
 
-如果 extension 已安装，点击 Chrome 工具栏中的 **JD Extractor (Local)** 图标即可。
+### 1. 环境要求
 
-如果还没安装：
-
-1. 在 Chrome 打开 `chrome://extensions/`。
-2. 打开右上角的 **Developer mode（开发者模式）**。
-3. 点击 **Load unpacked（加载已解压的扩展程序）**。
-4. 选择项目里的 `browser-extension` 文件夹。
-5. 建议把 **JD Extractor (Local)** 固定到工具栏。
-
-修改 extension 代码后，需要回到 `chrome://extensions/`，点击该 extension 的刷新按钮。
-
-### 3. 按 extension 的三个步骤操作
-
-#### Step 1 — Connect Notion
-
-1. 点击 **Connect Notion**。
-2. 在 Notion 授权页面选择包含目标数据库的页面或数据库。
-3. 授权后，在 Kairos 的数据库列表中点击 **Kairos-tracker**。
-4. 页面显示 **Notion Connected** 后，extension 会自动保存连接并关闭该页面。
-
-如果看到 **No databases found**，通常不是选错了，而是 Notion 在 OAuth 后还没有完成搜索索引。等待几秒后直接刷新当前页面；不要急着重新配置 integration。
-
-#### Step 2 — Upload Resume
-
-1. 选择 `.pdf` 或 `.txt` 简历。
-2. 点击 **Upload**。
-3. 看到 **Upload complete** 即可。
-
-简历只需上传一次，内容会保存在本机的 `data/notion_oauth.db` 中。更换简历时重新上传即可。
-
-PDF 必须含有可复制的文字。纯扫描图片 PDF 目前无法 OCR，可能会报 `Resume text too short`。
-
-#### Step 3 — Analyze This Page
-
-1. 在 Chrome 打开一个职位详情页面。
-2. 等待职位页面加载完成；Kairos 会自动尝试点击 job description 的 **Show more**。
-3. 点击 extension 图标。
-4. 点击 **Analyze this page**。
-5. extension 会先显示提取到的 JD 字符数、来源和质量，然后开始分析。
-6. 打开 Notion 的 **Kairos-tracker**，查看新生成的职位分析页面。
-
-Gemini 分析和 Notion 写入可能需要一些时间。保持 extension 弹窗打开时，它会显示成功或后端返回的具体错误。模型限额、网络错误或要求提取为空时，Kairos 不会再写入 `Error (Degraded)` 页面。
-
-## 首次安装
-
-### 环境要求
-
-- macOS、Linux 或 Windows
-- Python 3.10 或更高版本
-- Google Chrome
+- Python 3.10+
+- Google Chrome 或 Chromium 浏览器
 - Gemini API key
-- 一个可用的 Notion public integration
+- Notion public integration
 - 一个 Notion 数据库
 
-### 创建 Python 环境
-
-首次安装执行：
+### 2. 安装
 
 ```bash
 git clone https://github.com/Yerong27/Kairos.git
@@ -95,55 +60,67 @@ cd Kairos
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-```
-
-### 配置 `.env`
-
-复制示例配置，然后填写真实凭据：
-
-```bash
 cp .env.example .env
 ```
 
-主要配置如下：
+Windows PowerShell 激活环境：
 
-```dotenv
-GEMINI_API_KEY=你的_Gemini_API_Key
-GEMINI_MODEL=gemini-2.5-flash-lite
-
-NOTION_CLIENT_ID=你的_Notion_Client_ID
-NOTION_CLIENT_SECRET=你的_Notion_Client_Secret
-NOTION_REDIRECT_URI=http://localhost:8000/notion/callback
-
-KAIROS_DISABLE_CACHE=false
-KAIROS_DEBUG_DUMP=false
-KAIROS_RUN_ID=run1
+```powershell
+.venv\Scripts\Activate.ps1
 ```
 
-注意：
+### 3. 配置 `.env`
 
-- 不要把真实 API key、Notion secret 或 `.env` 发给别人。
-- Notion integration 中配置的 redirect URI 必须与 `.env` 完全一致。
-- extension 固定连接本机 `127.0.0.1:8000`，因此默认端口必须是 `8000`。
-- 本地数据固定保存在项目根目录的 `data/`，该目录已被 Git 忽略。
+```dotenv
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_RESUME_MODEL=gemini-2.5-flash-lite
 
-### Notion integration 设置
+NOTION_CLIENT_ID=your_notion_client_id
+NOTION_CLIENT_SECRET=your_notion_client_secret
+NOTION_REDIRECT_URI=http://localhost:8000/notion/callback
+```
 
-这个项目使用 Notion OAuth，而不是让 extension 直接保存一个固定 token。
+在 Notion integration 中添加完全相同的 OAuth redirect URI：
 
-Notion integration 至少需要：
+```text
+http://localhost:8000/notion/callback
+```
 
-- 读取内容，用来搜索已授权数据库。
-- 插入内容，用来创建分析页面。
-- OAuth redirect URI：`http://localhost:8000/notion/callback`。
+不要提交 `.env`。本仓库只跟踪无密钥的 `.env.example`。
 
-授权时必须把目标数据库分享给该 connection。当前使用的数据库名是 **Kairos-tracker**。
+### 4. 启动后端
 
-### Notion 数据库字段
+```bash
+uvicorn main:app --reload
+```
 
-推荐在 **Kairos-tracker** 中创建以下字段，并确保名称和类型完全一致：
+健康检查：<http://127.0.0.1:8000/health>
 
-| 字段名 | Notion 类型 | 必需程度 |
+### 5. 安装 Chrome extension
+
+1. 打开 `chrome://extensions/`。
+2. 启用 Developer mode。
+3. 点击 Load unpacked。
+4. 选择仓库中的 `browser-extension` 文件夹。
+5. 修改 extension 代码后，在该页面点击刷新。
+
+### 6. 使用
+
+1. 在 extension 中连接 Notion 并选择目标数据库。
+2. 上传 PDF 或 TXT 简历。
+3. 等待 `Candidate Profile created` 或 `Existing Candidate Profile reused`。
+4. 打开 LinkedIn 职位详情页。
+5. 点击 `Analyze this page`。
+6. 在 Notion 查看完整匹配矩阵。
+
+如果 Resume Parser 因额度或网络失败，简历文本仍会保存在本地，但分析按钮会保持禁用。重新上传同一文件即可重试；已成功的相同 Candidate Profile 不会重复调用 Gemini。
+
+## Notion 数据库字段
+
+推荐字段名称和类型：
+
+| 字段 | 类型 | 要求 |
 | --- | --- | --- |
 | Job Title | Title | 必需 |
 | Company | Text | 推荐 |
@@ -154,145 +131,241 @@ Notion integration 至少需要：
 | Required Skills | Multi-select | 推荐 |
 | URL | URL | 推荐 |
 
-如果推荐字段不存在或类型不匹配，程序会尝试进入 Safe Mode，只写入 `Job Title` 和页面正文。因此 `Job Title` 这个 Title 字段尤其重要。
+如果推荐字段不存在或类型错误，Kairos 会尝试 Safe Mode，仅写入标题和核心正文。
 
-## 它是怎么工作的
+## 本地数据与隐私
+
+Kairos 是本地工具，不是托管服务。以下数据保存在当前电脑：
 
 ```text
-当前 LinkedIn 职位网页
-    ↓ JSON-LD / Shadow DOM / LinkedIn selectors / fallback
-清洗后的职位描述（最多 18,000 字符）
-本地 FastAPI 后端
-    ↓ Gemini 提取职位、领域、工具和 seniority
-确定性评分引擎
-    ↓ 与已上传简历进行匹配
-Notion writer
-    ↓
-Kairos-tracker 中的完整 JD ↔ Resume 要求矩阵
+data/notion_oauth.db
+  ├── Notion OAuth access token
+  ├── 已选择的数据库
+  ├── 提取后的简历文本
+  └── Candidate Profile JSON
+
+data/v3_cache/
+  └── 职位分析缓存
+
+debug_runs/（仅启用 KAIROS_DEBUG_DUMP 时）
+  └── 调试结果
 ```
 
-主要组成：
+SQLite 中的 OAuth token、简历和 Candidate Profile 当前为明文。不要分享 `data/`、`.env` 或 `debug_runs/`。这些路径均已加入 `.gitignore`。
 
-- `main.py`：后端入口、Notion OAuth、简历上传、分析 API 和本地缓存。
-- `browser-extension/`：Chrome extension 界面、网页文字提取和 API 调用。
-- `backend/llm/analyze_v3.py`：Gemini 职位信息提取。
-- `backend/scoring/scoring_engine_v3.py`：匹配度、seniority gap 和申请建议。
-- `backend/notion/writer.py`：把结果格式化并写入 Notion。
-- `backend/config/`：领域和工具分类配置。
-- `data/notion_oauth.db`：本地授权、所选数据库和简历数据。
-- `data/v3_cache/`：相同职位和简历的分析缓存。
-- `debug_runs/`：开启 debug 后生成的诊断结果。
-- `archive/`：旧版本备份，不是当前运行入口。
+发送给外部服务的数据：
 
-Notion 的核心输出不是大模型主观挑选的几个 strengths/gaps，而是对已验证 JD 要求逐项展示：
+- 上传新简历时，简历文本发送给配置的 Gemini Resume Parser。
+- 分析职位时，只有清洗后的 JD 发送给 Gemini JD Parser；简历不会随 JD 请求发送。
+- 分析结果发送给用户授权的 Notion workspace。
 
-- `must / should / nice-to-have`
-- `matched / partial / missing / unverified`
-- JD 原文证据
-- 实际支持匹配的简历证据
-- JD 明确提到的工具及其匹配状态
+## 缓存与更新
 
-`missing` 只表示简历中没有找到证据。不要为了关键词而添加不真实的技能；如果确实具备该能力，应把对应项目、职责或结果更明确地写入简历。
+Candidate Profile 的有效性由以下组合决定：
+
+```text
+resume content hash
++ resume model
++ profile schema version
++ resume prompt version
+```
+
+任一项变化都会使旧 Profile 失效。职位缓存使用清洗后的 JD、Candidate Profile 版本、标题和输出语言生成 key；degraded 结果不会缓存。
+
+## 测试
+
+单元测试不会调用真实 Gemini 或 Notion：
+
+```bash
+python -m pytest tests -q
+```
+
+当前测试覆盖 OAuth 安全、Notion 重试、seniority、工具提取、要求矩阵、Candidate Profile hash 复用，以及 JD prompt 不包含简历。
 
 ## 常见问题
 
-### `Backend not reachable at 127.0.0.1:8000`
+### Backend not reachable
 
-后端没有运行，或启动端口不是 8000。回到 Terminal，按“启动后端”一节重新启动。
+确认 `uvicorn main:app --reload` 正在端口 8000 运行，并检查 <http://127.0.0.1:8000/health>。
 
-如果提示端口已被占用，先打开 <http://127.0.0.1:8000/health>。如果能看到正常 JSON，说明后端已经在运行，不要再启动第二个。
+### No databases found
 
-### `No databases found`
+Notion OAuth 后搜索索引可能短暂延迟。等待几秒后刷新选择页面，并确认目标数据库已分享给 Kairos integration。
 
-Notion 官方说明，OAuth 刚完成时搜索索引可能不是即时更新的。等待几秒，刷新数据库选择页面。当前授权已经确认可以读取到 `Kairos-tracker`。
+### Candidate Profile is error / missing
 
-如果多次刷新仍为空：
+Resume Parser 没有成功完成，常见原因是 Gemini `429 quota exceeded`、API key 无效或网络错误。重新上传同一简历会重试；成功的相同 Profile 会复用。
 
-1. 确认授权的是正确 Notion workspace。
-2. 打开 `Kairos-tracker`，在页面菜单的 Connections 中确认 Kairos integration 有访问权限。
-3. 回到 extension，点击 **Change database** 重新授权。
+### Gemini 429
 
-### `Notion OAuth not configured`
+Gemini 限额按项目和模型计算。等待额度恢复或启用付费额度。Kairos 不会缓存失败结果或写入误导性的 Notion 页面。
 
-`.env` 中缺少 `NOTION_CLIENT_ID` 或 `NOTION_CLIENT_SECRET`，或者后端不是从项目根目录启动。修改后要重启后端。
+### PDF 上传失败
 
-### `Invalid or expired OAuth state`
+当前 PDF 必须包含可提取文字；扫描图片 PDF 尚不支持 OCR。
 
-你可能刷新了旧的 callback 页面，或后端在授权过程中重启。关闭该页面，再从 extension 点击 **Connect Notion**。
+## 当前限制
 
-### extension 一直显示 `Checking...` 或连接状态没有更新
+- LinkedIn DOM 可能变化，提取器使用多级 fallback，但仍可能需要更新 selector。
+- LLM 提取具有不确定性；Kairos 使用原文验证和确定性评分限制其影响，但不能保证招聘结果或 ATS 通过。
+- SQLite 数据尚未加密。
+- 当前仅支持本机单用户式工作流，不适合直接暴露到公网。
 
-1. 确认后端在运行。
-2. 关闭并重新打开 extension 弹窗。
-3. 在 `chrome://extensions/` 刷新 extension。
-4. 必要时重新点击 **Connect Notion**。
+---
 
-### 简历上传失败
+# English
 
-- 只支持 `.txt` 和 `.pdf`。
-- PDF 必须含有可提取文字。
-- 简历提取出的文字必须至少 30 个字符。
-- 检查 Terminal 中的具体错误。
+Kairos is a local-first job matching assistant. Its Chrome extension extracts a structured job description from the active LinkedIn page. Gemini parses resumes and job descriptions in separate workflows. A deterministic local engine calculates fit, seniority gap, and `Should Apply?`, then writes the result to a user-selected Notion database.
 
-### 点击 Analyze 后 Notion 没有新页面
+## Architecture
 
-先看运行后端的 Terminal。常见原因包括：
+```text
+New resume upload
+  → Resume Parser (Gemini, only when resume content changes)
+  → Candidate Profile (local SQLite)
 
-- `GEMINI_API_KEY` 无效、额度不足或网络不可用。
-- 职位页面没有完整加载，或者网页禁止 extension 注入。
-- 当前页面不是普通网页，例如 `chrome://` 页面或 Chrome Web Store。
-- Notion 数据库字段名称或类型不匹配。
-- Notion 授权已经失效。
+New job page
+  → JD Parser (Gemini receives the JD only, never the resume)
+  → Job Profile
 
-extension 的 `Request sent` 只表示提取请求已经开始，不代表 Gemini 和 Notion 写入已经完成。
-
-如果错误中包含 Gemini `429` 或 `quota exceeded`，表示 API key 当前额度已用完。Kairos 会停止本次分析且不写入 Notion；额度恢复或更换有额度的 key 后重试。
-
-### 修改简历或逻辑后，结果还是旧的
-
-分析会保存在 `data/v3_cache/`。缓存 key 使用清洗后的职位文本、简历、标题和输出语言；LinkedIn 的发布时间或申请人数变化不会轻易导致重复分析。更换简历后会自动产生新结果，不完整或 degraded 的结果不会缓存。
-
-调试时可以在 `.env` 设置：
-
-```dotenv
-KAIROS_DISABLE_CACHE=true
+Candidate Profile + Job Profile
+  → Deterministic local scoring
+  → Score / Missing / Should Apply?
+  → Notion
 ```
 
-修改后重启后端。调试结束建议改回 `false`，避免重复调用 Gemini。
+- Re-uploading identical resume content reuses the existing Candidate Profile, even if the filename changed.
+- A changed resume, profile schema, prompt, or model triggers a new resume parse.
+- Every new JD still requires one Gemini request.
+- Gemini does not directly generate the final score or application recommendation.
 
-## 停止和重新启动
+## Features
 
-停止后端：在运行 Uvicorn 的 Terminal 中按 `Control + C`。
+- LinkedIn extraction through JSON-LD, Shadow DOM, dedicated selectors, and fallbacks
+- Automatic job-description expansion and surrounding-page noise removal
+- Separate Gemini prompts, schemas, and cache lifecycles for resumes and JDs
+- JD-grounded requirement evidence
+- MUST / SHOULD / NICE-TO-HAVE classification
+- Complete Match / Partial / Missing requirement matrix
+- Explicit JD tool and ATS-keyword coverage
+- Seniority inference using dates, recent roles, responsibilities, and ownership
+- Deterministic scores, bands, and `Should Apply?`
+- Notion OAuth and database selection
+- No caching or Notion writes for incomplete analyses
 
-下次使用只需再次执行：
+## Quick start
+
+### Requirements
+
+- Python 3.10+
+- Google Chrome or another Chromium browser
+- A Gemini API key
+- A Notion public integration
+- A Notion database
+
+### Install
 
 ```bash
+git clone https://github.com/Yerong27/Kairos.git
 cd Kairos
+python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Configure `.env`:
+
+```dotenv
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_RESUME_MODEL=gemini-2.5-flash-lite
+
+NOTION_CLIENT_ID=your_notion_client_id
+NOTION_CLIENT_SECRET=your_notion_client_secret
+NOTION_REDIRECT_URI=http://localhost:8000/notion/callback
+```
+
+Add the same redirect URI to your Notion integration, then start the backend:
+
+```bash
 uvicorn main:app --reload
 ```
 
-一般不需要重新安装 extension、重新连接 Notion 或重新上传简历。
+Open `chrome://extensions/`, enable Developer mode, choose Load unpacked, and select `browser-extension` from this repository.
 
-## 开发与测试（可选）
+In the extension:
 
-安装开发和测试依赖：
+1. Connect Notion and select a database.
+2. Upload a PDF or TXT resume.
+3. Wait for the Candidate Profile to become ready.
+4. Open a LinkedIn job page.
+5. Select `Analyze this page`.
+6. Review the full match matrix in Notion.
 
-```bash
-python -m pip install -r requirements-dev.txt
+## Recommended Notion properties
+
+| Property | Type | Requirement |
+| --- | --- | --- |
+| Job Title | Title | Required |
+| Company | Text | Recommended |
+| Match Score | Number | Recommended |
+| Should Apply? | Select | Recommended |
+| Seniority Gap | Select | Recommended |
+| Missing Skills | Multi-select | Recommended |
+| Required Skills | Multi-select | Recommended |
+| URL | URL | Recommended |
+
+If optional properties are missing or invalid, Kairos attempts a safe-mode write with the title and core page body.
+
+## Local data and privacy
+
+Kairos is a local tool, not a hosted service. It stores Notion OAuth tokens, extracted resume text, and Candidate Profiles in `data/notion_oauth.db`. Job-analysis caches live in `data/v3_cache/`. Optional debug dumps live in `debug_runs/`.
+
+These local records are currently stored in plaintext. Never share `.env`, `data/`, or `debug_runs/`. All are excluded from Git.
+
+External data flow:
+
+- On a new resume upload, extracted resume text is sent to the configured Gemini Resume Parser.
+- During job analysis, only the cleaned JD is sent to the Gemini JD Parser. The resume is not included.
+- Analysis results are sent to the Notion workspace authorized by the user.
+
+## Candidate Profile lifecycle
+
+A Candidate Profile is keyed by:
+
+```text
+resume content hash
++ resume model
++ profile schema version
++ resume prompt version
 ```
 
-运行不调用真实 Notion 写入的单元测试：
+Any change invalidates the old profile. Re-uploading the same resume retries a failed profile but reuses a successful current profile.
+
+## Tests
+
+Unit tests do not call live Gemini or Notion services:
 
 ```bash
-python -m pytest tests
+python -m pytest tests -q
 ```
 
-## 当前已知限制
+## Troubleshooting
 
-- extension 只有在弹窗保持打开时才会显示最终成功或错误状态。
-- Notion 首次 OAuth 后仍可能有短暂索引延迟；数据库选择页提供 Refresh 按钮。
-- 网页提取依赖页面 DOM；复杂的动态网站可能提取不完整。
-- 只支持文字型 PDF，不支持扫描件 OCR。
-- 当前 Notion API 默认版本仍是 `2022-06-28`，未来应迁移到新的 `data_source` API。
-- OAuth token、简历内容和数据库选择保存在本机 SQLite 文件中，没有额外加密；不要把 `data/notion_oauth.db` 分享或提交到公开仓库。
+- **Backend unreachable:** confirm the backend is running on port 8000 and open <http://127.0.0.1:8000/health>.
+- **No databases found:** wait briefly after OAuth, refresh the selection page, and confirm the database was shared with the integration.
+- **Candidate Profile missing/error:** re-upload the resume. This retries failed parsing without re-parsing a successful identical profile.
+- **Gemini 429:** wait for quota recovery or enable paid quota. Failed results are not cached or written to Notion.
+- **PDF failure:** PDFs must contain extractable text. OCR is not currently supported.
+
+## Limitations
+
+- LinkedIn may change its DOM and require selector updates.
+- LLM extraction is probabilistic. Grounded evidence and deterministic scoring reduce, but do not eliminate, model error.
+- Local SQLite data is not encrypted.
+- The backend is intended for a local single-user workflow and should not be exposed directly to the public internet.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -55,6 +55,7 @@ from backend.ir.schema_v3 import (
     DomainFacet,
     ExtractedOwnership,
 )
+from backend.ir.candidate_profile import CandidateProfile
 from backend.ir.domain_catalog import load_domain_catalogs, adjudicate_domains
 from backend.ir.canonicalize import canon_domain, canon_tool
 
@@ -884,7 +885,6 @@ def _extract_with_gemini_v3(
     page_text: str,
     *,
     title: Optional[str],
-    user_profile: Optional[str],
     output_language: str,
 ) -> Dict[str, Any]:
     _ensure_gemini_configured()
@@ -963,10 +963,6 @@ GLOBAL RULES (STRICT KAIROS LOGIC):
 {page_text[:25000]}
 </job_text>
 
-<candidate_profile>
-{(user_profile or "N/A")[:15000]}
-</candidate_profile>
-
 OUTPUT FORMAT (JSON ONLY):
 Produce a single valid JSON object following this structure. Do NOT wrap in markdown code blocks.
 
@@ -974,7 +970,6 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
   "job_title": "string",
   "company": "string",
   "job_seniority_signal": "junior|mid|senior|lead|principal",
-  "candidate_seniority_signal": "string",
   "domain_requirements": [
     {{
       "domain_id": "string (optional, copy 'id' from catalog if exact match)",
@@ -991,7 +986,6 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
       ]
     }}
   ],
-  "candidate_skills": ["string", "string"],
   "ownership_and_scope": {{
     "ownership": {{ "present": true, "level_val": 0, "evidence": ["string"] }},
     "scope": {{ "level_val": 0, "evidence": ["string"] }},
@@ -1038,22 +1032,7 @@ OUTPUT LANGUAGE: {output_language}
         except Exception:
             parsed_ir.raw_llm_json = {}
 
-        # Inject Rule-based Seniority
-        # We store it in a temporary field or handle it in Scoring.
-        # For now, let's allow Scoring Engine to re-calculate rule seniority from raw text if needed,
-        # OR we can attach it to metadata?
-        # Plan says: "Seniority Cap: `seniority_final = min(max(rule_level, llm_level - 1), 3)`"
-        # scoring_engine_v3 has access to page_text? No, it takes AnalyzeIRv3.
-        # So we should probably inject the rule signal into the IR.
-        # Let's override/augment candidate_seniority_signal or add a hidden field?
-        # Actually, scoring_engine does NOT have access to page_text.
-        # Let's put the rule-based determination into "job_seniority_signal" if logic allows,
-        # OR better: Add `rule_seniority_level` to AnalyzeIRv3?
-        # Schema change required?
-        # Wait, the plan said: "Implement `extract_seniority_rules` (Regex-based) in `analyze_v3.py`".
-        # It implies analyze_v3 does it.
-        # But where does it store it?
-        # Let's repurpose "evidence_hints" to store 'rule_seniority' for scoring engine?
+        # Preserve the deterministic JD seniority signal alongside the model output.
         parsed_ir.evidence_hints['rule_seniority_level'] = str(rule_seniority)
 
         # Adjudicate against catalog (THE Deterministic Step)
@@ -1965,7 +1944,7 @@ def analyze_v3(
     *,
     page_text: str,
     title: Optional[str] = None,
-    user_profile: Optional[str] = None,
+    candidate_profile: Optional[Dict[str, Any]] = None,
     output_language: str = "en",
 ) -> AnalyzeIRv3:
     if not (page_text or "").strip():
@@ -1980,18 +1959,13 @@ def analyze_v3(
     page_text_lines_lower = _normalize_preserve_newlines(page_text_orig).lower()
     page_text_lines_flat_lower = _normalize_whitespace(page_text_lines_lower)
 
-    safe_profile = (user_profile or "").strip()[:15000]
-    safe_profile_flat_lower = _normalize_whitespace(safe_profile).lower()
-
     raw = _extract_with_gemini_v3(
         page_text=page_text_orig,
         title=title,
-        user_profile=safe_profile,
         output_language=output_language,
     )
 
     job = raw.get("job") or {}
-    cand = raw.get("candidate") or {}
 
     explicit_title = _sanitize_field(
         job.get("explicit_title")
@@ -2044,79 +2018,16 @@ def analyze_v3(
         if inferred_quote and _validate_quote(inferred_quote, page_text_flat_lower):
             job_seniority_evidence_final = inferred_quote
 
-    raw_c_title = _normalize_whitespace(str(cand.get("seniority_evidence") or ""))
-    candidate_title_signal = raw_c_title if raw_c_title else "unknown"
-
-    candidate_seniority_signal = "unknown"
-    candidate_seniority_normalized = "unknown"
-    candidate_seniority_numeric: Optional[float] = None
-    candidate_seniority_reason = "unknown"
-
-    if raw_c_title and _validate_quote(raw_c_title, safe_profile_flat_lower) and _is_valid_title_signal(raw_c_title):
-        norm_label, numeric_level, reason = _infer_candidate_level_from_title(raw_c_title)
-        candidate_seniority_normalized = norm_label
-        candidate_seniority_numeric = numeric_level
-        candidate_seniority_reason = reason
-        candidate_seniority_signal = norm_label if norm_label != "unknown" else raw_c_title
-    elif raw_c_title:
-        candidate_seniority_signal = raw_c_title
-        candidate_seniority_reason = "title_not_validated_or_invalid_signal"
-
-    candidate_job_family = _detect_job_family(page_text)
-    exp_level, exp_reason, top_entries = _derive_candidate_level_from_experience(
-        safe_profile, job_family=candidate_job_family
-    )
-    exp_cap = "junior" if exp_reason == "recent_floor_apprentice" else None
-    if exp_level:
-        try:
-            raw.setdefault("_debug_meta", {})
-            raw["_debug_meta"]["candidate_seniority_top_experiences"] = [
-                {
-                    "title": e.get("title"),
-                    "level": e.get("level"),
-                    "months_ago": e.get("months_ago"),
-                    "duration_months": e.get("duration_months"),
-                    "weight": round(float(e.get("weight", 0.0)), 4),
-                    "relevance_score": e.get("relevance_score"),
-                    "mid_signal_count": e.get("mid_signal_count"),
-                    "senior_signal_count": e.get("senior_signal_count"),
-                }
-                for e in top_entries
-            ]
-            raw["_debug_meta"]["candidate_seniority_exp_reason"] = exp_reason
-            raw["_debug_meta"]["candidate_seniority_exp_cap"] = exp_cap
-            raw["_debug_meta"]["candidate_seniority_job_family"] = candidate_job_family
-        except Exception:
-            pass
-
-    # Deterministic, job-family-relevant experience takes precedence over an
-    # unsupported LLM label. This also supports the 1.5 junior-to-mid band.
-    if exp_level:
-        candidate_seniority_normalized = exp_level
-        candidate_seniority_signal = exp_level
-        candidate_seniority_numeric = _level_num(exp_level)
-        candidate_seniority_reason = f"experience_inference:{exp_reason}"
-
-    # Only trust an LLM seniority label when it supplied a candidate title/evidence
-    # that was validated against the resume. A bare `mid` prediction is not evidence.
-    if candidate_seniority_normalized == "unknown" and raw_c_title:
-        raw_signal = _norm_seniority_label(raw.get("candidate_seniority_signal") or cand.get("seniority_signal"))
-        if raw_signal != "unknown":
-            candidate_seniority_normalized = raw_signal
-            candidate_seniority_signal = raw_signal
-            candidate_seniority_numeric = _level_num(raw_signal)
-            candidate_seniority_reason = "raw_signal"
-
-    if exp_cap and candidate_seniority_normalized in ("mid", "senior", "lead"):
-        candidate_seniority_normalized = exp_cap
-        candidate_seniority_signal = exp_cap
-        candidate_seniority_numeric = _level_num(exp_cap)
-        candidate_seniority_reason = "exp_floor_cap_applied"
-
-    # _extract_with_gemini_v3 returns the validated AnalyzeIRv3 schema at the
-    # top level. Keep compatibility with older cached/nested response shapes.
-    candidate_skills = _clean_candidate_skill_list(cand.get("skills") or raw.get("candidate_skills"))
-    candidate_skills = [canon_tool(s) or s for s in (candidate_skills or [])]
+    try:
+        profile = CandidateProfile.model_validate(candidate_profile or {})
+    except Exception as exc:
+        raise ValueError(f"Invalid Candidate Profile: {exc}") from exc
+    candidate_skills = [canon_tool(s) or s for s in profile.candidate_skills]
+    candidate_seniority_signal = profile.candidate_seniority_signal or "unknown"
+    candidate_seniority_normalized = candidate_seniority_signal
+    candidate_seniority_numeric = _level_num(candidate_seniority_signal)
+    candidate_seniority_reason = profile.seniority_reason or "candidate_profile"
+    candidate_title_signal = profile.roles[0].title if profile.roles else "unknown"
 
     domain_requirements: List[DomainRequirement] = []
     raw_domains = _safe_list(job.get("domain_requirements") or raw.get("domain_requirements"))

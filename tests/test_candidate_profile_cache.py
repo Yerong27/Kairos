@@ -1,0 +1,256 @@
+import tempfile
+import json
+import sqlite3
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+import main
+from backend.ir.candidate_profile import CandidateEvidenceClaim, CandidateProfile
+from backend.ir.schema_v3 import AnalyzeIRv3, DomainRequirement
+from backend.llm import analyze_v3 as jd_analyzer
+from backend.llm import analyze_resume as resume_analyzer
+
+
+def _profile(skill: str = "Python") -> CandidateProfile:
+    return CandidateProfile(
+        candidate_skills=[skill],
+        candidate_domains=["API Development"],
+        candidate_seniority_signal="junior_to_mid",
+        evidence_claims=[
+            CandidateEvidenceClaim(
+                resume_quote=f"Built production services with {skill}.",
+                skills=[skill],
+                domains=["API Development"],
+            )
+        ],
+    )
+
+
+def test_resume_parser_keeps_only_resume_grounded_claims():
+    now = time.gmtime()
+    start_year = now.tm_year - 2
+    resume = f"""Cloud Support Associate\nJAN {start_year} – PRESENT\nBuilt production services with Python."""
+    payload = {
+        "candidate_skills": ["Python", "Kubernetes"],
+        "candidate_domains": ["API Development"],
+        "candidate_seniority_signal": "senior",
+        "seniority_reason": "model guess",
+        "evidence_claims": [
+            {
+                "resume_quote": "Built production services with Python.",
+                "skills": ["Python"],
+                "domains": ["API Development"],
+            },
+            {
+                "resume_quote": "Led Kubernetes platform strategy.",
+                "skills": ["Kubernetes"],
+                "domains": ["Platform Engineering"],
+            },
+        ],
+        "roles": [],
+    }
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, *_args, **_kwargs):
+            return SimpleNamespace(text=json.dumps(payload))
+
+    with patch.object(resume_analyzer, "_ensure_configured"), patch.object(
+        resume_analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        profile = resume_analyzer.analyze_resume(resume)
+
+    assert [claim.resume_quote for claim in profile.evidence_claims] == [
+        "Built production services with Python."
+    ]
+    assert "Python" in profile.candidate_skills
+    assert "Kubernetes" not in profile.candidate_skills
+    assert profile.candidate_seniority_signal == "junior_to_mid"
+
+
+def test_resume_profile_is_reused_until_resume_content_changes():
+    client = TestClient(main.app)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with patch.object(main, "NOTION_OAUTH_DB", db_path), patch.object(
+            main, "kairos_analyze_resume", side_effect=[_profile("Python"), _profile("Go")]
+        ) as parser:
+            main._store_notion_user(
+                user_token="user",
+                access_token="notion-token",
+                database_id="database",
+                database_name="Jobs",
+            )
+            headers = {"Authorization": "Bearer user"}
+
+            first = client.post(
+                "/resume/upload",
+                files={"file": ("resume.txt", b"Built production services with Python.", "text/plain")},
+                headers=headers,
+            )
+            repeated = client.post(
+                "/resume/upload",
+                files={"file": ("renamed.txt", b"Built production services with Python.", "text/plain")},
+                headers=headers,
+            )
+            changed = client.post(
+                "/resume/upload",
+                files={"file": ("resume-v2.txt", b"Built production services with Go.", "text/plain")},
+                headers=headers,
+            )
+
+            assert first.status_code == repeated.status_code == changed.status_code == 200
+            assert first.json()["candidate_profile_reused"] is False
+            assert repeated.json()["candidate_profile_reused"] is True
+            assert changed.json()["resume_changed"] is True
+            assert parser.call_count == 2
+
+            user = main._get_notion_user("user")
+            record = main._get_candidate_profile_record("user")
+            assert record["resume_hash"] == user["resume_hash"]
+            assert '"Go"' in record["profile_json"]
+
+
+def test_reconnecting_notion_preserves_resume_and_candidate_profile():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with patch.object(main, "NOTION_OAUTH_DB", db_path):
+            main._store_notion_user(
+                user_token="user", access_token="old", database_id="db-1", database_name="Jobs"
+            )
+            resume_hash = main._sha256_text("kairos_resume:1", "Resume text")
+            main._store_resume_for_user("user", "Resume text", "resume.txt", resume_hash)
+            main._store_candidate_profile_record(
+                user_token="user",
+                resume_hash=resume_hash,
+                status="ready",
+                profile=_profile().model_dump(),
+            )
+
+            main._store_notion_user(
+                user_token="user", access_token="new", database_id="db-2", database_name="New Jobs"
+            )
+
+            user = main._get_notion_user("user")
+            assert user["access_token"] == "new"
+            assert user["resume_text"] == "Resume text"
+            assert main._candidate_profile_record_is_current(
+                main._get_candidate_profile_record("user"), resume_hash
+            )
+
+
+def test_existing_database_is_migrated_without_losing_resume():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE notion_users (
+                    user_token TEXT PRIMARY KEY, access_token TEXT NOT NULL,
+                    database_id TEXT, database_name TEXT, created_at INTEGER,
+                    resume_text TEXT, resume_filename TEXT, resume_uploaded_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO notion_users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("user", "token", "db", "Jobs", 1, "Existing resume", "resume.txt", 1),
+            )
+            conn.commit()
+
+        with patch.object(main, "NOTION_OAUTH_DB", db_path):
+            main._init_notion_oauth_db()
+            user = main._get_notion_user("user")
+            assert user["resume_text"] == "Existing resume"
+            assert user["resume_hash"] is None
+            with sqlite3.connect(db_path) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "candidate_profiles" in tables
+
+
+def test_jd_gemini_prompt_does_not_contain_candidate_profile():
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return SimpleNamespace(
+                text=(
+                    '{"job_title":"Engineer","company":"Example",'
+                    '"job_seniority_signal":"mid","domain_requirements":[]}'
+                )
+            )
+
+    with patch.object(jd_analyzer, "_ensure_gemini_configured"), patch.object(
+        jd_analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        jd_analyzer._extract_with_gemini_v3(
+            "Requirements: build APIs and reliable services.",
+            title="Engineer",
+            output_language="en",
+        )
+
+    assert "<candidate_profile>" not in captured["prompt"]
+    assert "candidate_skills" not in captured["prompt"]
+
+
+def test_job_analysis_uses_stored_profile_without_sending_raw_resume_to_jd_parser():
+    client = TestClient(main.app)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        cache_dir = Path(tmp) / "cache"
+        profile = _profile("Python")
+        ir = AnalyzeIRv3(
+            job_title="API Engineer",
+            company="Example",
+            job_seniority_signal="mid",
+            candidate_seniority_signal=profile.candidate_seniority_signal,
+            candidate_skills=profile.candidate_skills,
+            domain_requirements=[
+                DomainRequirement(
+                    name="API Development",
+                    importance="must",
+                    evidence_quote="Build reliable Python APIs",
+                    evidence_level="anchored",
+                    anchors=["Python", "APIs"],
+                )
+            ],
+        )
+        with patch.object(main, "NOTION_OAUTH_DB", db_path), patch.object(
+            main, "V3_CACHE_DIR", cache_dir
+        ), patch.object(main, "kairos_analyze_v3", return_value=ir) as jd_parser, patch.object(
+            main, "create_notion_page", return_value="https://notion.so/page"
+        ):
+            main._store_notion_user(
+                user_token="user", access_token="notion", database_id="db", database_name="Jobs"
+            )
+            resume_text = "Built production services with Python."
+            resume_hash = main._sha256_text("kairos_resume:1", resume_text)
+            main._store_resume_for_user("user", resume_text, "resume.txt", resume_hash)
+            main._store_candidate_profile_record(
+                user_token="user", resume_hash=resume_hash, status="ready", profile=profile.model_dump()
+            )
+
+            response = client.post(
+                "/analyze_and_save",
+                headers={"Authorization": "Bearer user"},
+                json={
+                    "title": "API Engineer",
+                    "page_text": "Requirements: Build reliable Python APIs for production services and own delivery.",
+                    "use_v3": True,
+                },
+            )
+
+        assert response.status_code == 200, response.text
+        kwargs = jd_parser.call_args.kwargs
+        assert "user_profile" not in kwargs
+        assert kwargs["candidate_profile"]["candidate_skills"] == ["Python"]

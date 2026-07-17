@@ -57,15 +57,18 @@ function refreshStatus() {
         document.getElementById("change-db-btn").disabled = false;
         notionMsg.textContent = data.notion_connected ? "Ready." : "Connect Notion to continue.";
         if (data.resume_present) {
-          resumeStatus.textContent = "Resume uploaded";
+          const profileReady = Boolean(data.candidate_profile_current);
+          resumeStatus.textContent = profileReady ? "Resume ready" : "Resume uploaded; Candidate Profile not ready";
           const meta = [];
           if (data.resume_filename) meta.push(data.resume_filename);
           if (data.resume_uploaded_at) meta.push(new Date(data.resume_uploaded_at * 1000).toLocaleString());
+          if (data.candidate_profile_status) meta.push(`Profile: ${data.candidate_profile_status}`);
           resumeMeta.textContent = meta.join(" • ");
           resumeSection.classList.remove("hidden");
           analyzeSection.classList.remove("hidden");
           uploadBtn.disabled = false;
-          analyzeBtn.disabled = false;
+          analyzeBtn.disabled = !profileReady;
+          if (!profileReady) analyzeMsg.textContent = "Re-upload the resume to create or retry its Candidate Profile.";
         } else {
           resumeStatus.textContent = "Resume not uploaded";
           resumeMeta.textContent = "";
@@ -107,7 +110,7 @@ uploadBtn.addEventListener("click", () => {
     return;
   }
   uploadBtn.disabled = true;
-  uploadBtn.textContent = "Uploading...";
+  uploadBtn.textContent = "Uploading and analyzing...";
   resumeFile.disabled = true;
   chooseFileBtn.disabled = true;
 
@@ -132,7 +135,15 @@ uploadBtn.addEventListener("click", () => {
         return data;
       })
       .then((data) => {
-        uploadMsg.textContent = data && data.status === "saved" ? "Upload complete." : "Upload failed.";
+        if (!data || data.status !== "saved") {
+          uploadMsg.textContent = "Upload failed.";
+        } else if (data.candidate_profile_status === "ready") {
+          uploadMsg.textContent = data.candidate_profile_reused
+            ? "Upload complete. Existing Candidate Profile reused."
+            : "Upload complete. Candidate Profile created.";
+        } else {
+          uploadMsg.textContent = data.warning || "Resume saved, but Candidate Profile creation failed. Re-upload to retry.";
+        }
         refreshStatus();
       })
       .catch((err) => {
