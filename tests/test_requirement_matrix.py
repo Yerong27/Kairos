@@ -157,10 +157,10 @@ def test_jd_tool_extraction_deduplicates_databases_and_drops_low_signal_concepts
 
     tools = analyzer.extract_tools_from_jd(page_text)
 
-    assert "Ansible" in tools
-    assert "CloudFormation or Terraform" in tools
-    assert tools.count("Relational Databases") == 1
-    assert tools.count("NoSQL Databases") == 1
+    assert "Ansible" not in tools
+    assert "CloudFormation or Terraform" not in tools
+    assert tools.count("Relational Database Management Systems") == 1
+    assert tools.count("NoSQL databases") == 1
     assert "YAML" not in tools
     assert "JSON" not in tools
     assert "virtualization" not in tools
@@ -259,6 +259,36 @@ def test_public_contract_contains_every_requirement_with_evidence_status():
     assert [tool["name"] for tool in by_name["Observability"]["tools"]] == []
 
 
+def test_illustrative_examples_do_not_become_individual_keyword_gaps():
+    ir = AnalyzeIRv3(
+        job_title="Operations Analyst",
+        company="Example",
+        job_seniority_signal="junior",
+        candidate_seniority_signal="junior",
+        candidate_skills=[],
+        domain_requirements=[
+            DomainRequirement(
+                name="Reporting Automation",
+                importance="should",
+                evidence_quote="Reporting tools such as Excel, Tableau, or Power BI",
+                evidence_level="exact",
+                examples=[
+                    ToolEvidence(
+                        name="Excel",
+                        importance="should",
+                        evidence_quote="Reporting tools such as Excel, Tableau, or Power BI",
+                    )
+                ],
+            )
+        ],
+    )
+
+    contract = score_to_public_dict(score_ir_v3(ir))
+
+    assert all(item["name"] != "Excel" for item in contract["tools"]["items"])
+    assert contract["requirements"]["items"][0]["name"] == "Reporting Automation"
+
+
 def test_notion_uses_user_facing_summary_without_evidence_matrix():
     contract = _public_contract()
     captured = {}
@@ -305,9 +335,11 @@ def test_notion_uses_user_facing_summary_without_evidence_matrix():
     assert "🎯 JD Requirements Match" in serialized
     assert "❌ Missing" in serialized
     assert "✅ Matched" in serialized
-    assert "🧰 Tool Match" in serialized
+    assert "🔑 Explicit Keyword Match" in serialized
     assert "⚠️ Not shown in resume" in serialized
     assert "Extracted Tools (JD)" not in serialized
     assert "Layered Breakdown" not in serialized
-    assert "🔒 Decision Constraints" in serialized
+    assert "📈 Seniority" in serialized
     assert "Your level: junior" in serialized
+    assert "none=92" not in serialized
+    assert "Notes" not in serialized

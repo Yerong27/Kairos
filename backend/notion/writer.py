@@ -292,29 +292,7 @@ def _split_strengths(public_contract: Dict[str, Any]) -> Tuple[List[str], List[s
 
 
 def _compact_tool_match_items(public_contract: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """Return one clean, de-duplicated tool summary for the user-facing page."""
-    aliases = {
-        "rdbms": "Relational Databases",
-        "relational": "Relational Databases",
-        "relational database": "Relational Databases",
-        "relational databases": "Relational Databases",
-        "relational database management system": "Relational Databases",
-        "relational database management systems": "Relational Databases",
-        "nosql database": "NoSQL Databases",
-        "nosql databases": "NoSQL Databases",
-    }
-    # These are noisy when extracted from generic example/concept lists. More
-    # specific tools such as Docker, Kubernetes, Ansible, or Terraform remain.
-    hidden = {
-        "yaml",
-        "json",
-        "container",
-        "containers",
-        "virtualization",
-        "configuration management",
-        "source management",
-        "application deployment",
-    }
+    """Return one clean, de-duplicated explicit-keyword summary."""
     status_rank = {"missing": 1, "partial": 2, "matched": 3}
     by_name: Dict[str, Tuple[str, str]] = {}
 
@@ -324,9 +302,9 @@ def _compact_tool_match_items(public_contract: Dict[str, Any]) -> Tuple[List[str
             continue
         raw_name = _safe_str(item.get("name", "")).strip()
         raw_key = raw_name.lower()
-        if not raw_name or raw_key in hidden:
+        if not raw_name:
             continue
-        name = aliases.get(raw_key, raw_name)
+        name = raw_name
         status = _safe_str(item.get("status", "missing")).strip().lower()
         if status not in status_rank:
             status = "missing"
@@ -345,7 +323,7 @@ def _render_tool_match_to_notion(public_contract: Dict[str, Any]) -> List[dict]:
     if not matched and not not_shown:
         return []
 
-    blocks = [_notion_heading("🧰 Tool Match", level=2)]
+    blocks = [_notion_heading("🔑 Explicit Keyword Match", level=2)]
     if matched:
         blocks.extend(_notion_bullets("✅ Matched", matched, heading_level=3, max_items=12))
     if not_shown:
@@ -521,24 +499,13 @@ def _render_missing_to_notion(public_contract: Dict[str, Any]) -> List[dict]:
                     "bulleted_list_item": {"rich_text": _notion_rich_text(it)},
                 }
             )
-        notes = []
-        if isinstance(missing_obj, dict):
-            notes = [_safe_str(x).strip() for x in _as_list(missing_obj.get("notes", [])) if _safe_str(x).strip()]
-        if notes:
-            blocks.append(_notion_paragraph(_clamp_text(" ".join(notes), 400)))
-
     return blocks
 
 
 def _render_decision_constraints_to_notion(public_contract: Dict[str, Any], resp: Any) -> List[dict]:
-    blocks: List[dict] = []
-
-    level, severity, must_missing_names, risk_notes = _extract_public_risk(public_contract)
-
     job_level = None
     cand_level = None
     gap_levels = None
-    cap_val = None
     try:
         layers = _as_list(_get_in(public_contract, ["layers"], []))
         for ly in layers:
@@ -548,123 +515,32 @@ def _render_decision_constraints_to_notion(public_contract: Dict[str, Any], resp
                     job_level = meta.get("job_level")
                     cand_level = meta.get("candidate_level")
                     gap_levels = meta.get("gap")
-                    cap_val = meta.get("cap")
                 break
     except Exception:
         pass
 
-    has_any = bool(must_missing_names) or (cap_val is not None) or bool(getattr(resp, "cap", None)) or bool(
-        getattr(resp, "seniority_gap", None)
-    )
-    if not has_any:
-        return blocks
-
-    blocks.append(_notion_heading("🔒 Decision Constraints", level=2))
-    blocks.append(
-        _notion_paragraph(
-            "This recommendation is driven by a small number of strong, structural constraints — not by overall skill quality."
-        )
-    )
-
-    blocks.append(_notion_heading("1️⃣ Seniority Constraint (Primary)", level=3))
-    lines: List[str] = []
     jl = _safe_str(job_level, "").strip()
     cl = _safe_str(cand_level, "").strip()
     gl = _safe_str(gap_levels, "").strip()
-
     bucket = _safe_str(getattr(resp, "seniority_gap", ""), "").strip().lower()
-    cv = cap_val if cap_val is not None else getattr(resp, "cap", None)
+    if not (jl or cl or gl or bucket):
+        return []
 
-    blocking_reason = getattr(resp, "blocking_reason", None)
-    if blocking_reason:
-        lines.append(f"⛔ BLOCKED: {blocking_reason}")
+    parts: List[str] = []
+    if jl:
+        parts.append(f"Job level: {jl}")
+    if cl:
+        parts.append(f"Your level: {cl}")
+    if gl:
+        parts.append(f"Gap: {gl}")
 
-    ownership = getattr(resp, "ownership", {}) or {}
-    own_present = ownership.get("ownership_present")
-    scope = ownership.get("scope_level", "unknown")
-    lead_present = ownership.get("leadership_present")
-
-    if own_present or lead_present or (scope and scope != "unknown"):
-        details = []
-        if own_present:
-            details.append("Ownership ✅")
-        if lead_present:
-            details.append("Leadership ✅")
-        if scope and scope != "unknown":
-            details.append(f"Scope: {scope}")
-        lines.append(f"Signals: {', '.join(details)}.")
-
-    if jl or cl or gl:
-        parts = []
-        if jl:
-            parts.append(f"Job level: {jl}")
-        if cl:
-            parts.append(f"Your level: {cl}")
-        if gl:
-            parts.append(f"Gap: {gl}")
-        lines.append(" • ".join(parts) + ".")
-
-    def _cap_phrase(v) -> str:
-        if v is None:
-            return ""
-        try:
-            return f" capped at {int(v)}"
-        except Exception:
-            sv = _safe_str(v, "").strip()
-            return f" capped at {sv}" if sv else ""
-
-    cap_phrase = _cap_phrase(cv)
-
-    if bucket == "cliff":
-        lines.append(
-            "Seniority gap is a cliff for this role. "
-            f"As a result, the final score is{cap_phrase}, regardless of skill overlap."
-        )
-    elif bucket in ("small", "medium"):
-        lines.append(
-            "Seniority gap may reduce fit and applies a cap to the final score. "
-            f"The final score is{cap_phrase} after skill overlap is computed."
-        )
-    elif bucket in ("none", "overqualified"):
-        if bucket == "overqualified":
-            lines.append(
-                "Candidate may be overqualified by seniority. This is not a hard blocker, "
-                "but some teams may worry about role scope or retention."
-            )
-        else:
-            lines.append("No seniority cap applied.")
-    else:
-        if cap_phrase:
-            lines.append(f"Seniority assessment is uncertain; final score may be{cap_phrase} depending on role level.")
-        else:
-            lines.append("Seniority assessment is uncertain; no cap decision could be derived.")
-
-    blocks.append(_notion_paragraph(" ".join([x for x in lines if x])))
-
-    if must_missing_names:
-        blocks.append(_notion_heading("2️⃣ Critical Must Skill Missing", level=3))
-        blocks.append(
-            _notion_paragraph(
-                "One required (must-have) capability is missing:\n" + "– " + "\n– ".join(must_missing_names[:10])
-            )
-        )
-        blocks.append(_notion_paragraph("This is treated as a hard requirement in the decision logic."))
-    else:
-        blocks.append(_notion_heading("✅ No critical must missing", level=3))
-        blocks.append(_notion_paragraph("All must-have requirements are covered based on current evidence."))
-
-    blocks.append(_notion_heading("3️⃣ Model Confidence", level=3))
-    blocks.append(_notion_paragraph("Confidence: High"))
-    blocks.append(_notion_paragraph("These constraints are rule-based and explicit, not inferred from weak signals."))
-
-    lvl = (level or "none").upper()
-    sev = (severity or "none").upper()
-    if (lvl != "NONE") or (sev != "NONE"):
-        blocks.append(_notion_paragraph(f"Likelihood (changes with more evidence): {lvl} • Impact (on verdict): {sev}"))
-
-    if risk_notes:
-        blocks.extend(_notion_bullets("Notes", risk_notes, max_items=10, heading_level=3))
-
+    blocks: List[dict] = [_notion_heading("📈 Seniority", level=2)]
+    if parts:
+        blocks.append(_notion_paragraph(" • ".join(parts)))
+    if bucket in ("small", "medium", "cliff"):
+        blocks.append(_notion_paragraph("The seniority difference reduced the final recommendation."))
+    elif bucket == "overqualified":
+        blocks.append(_notion_paragraph("Your seniority may be above the scope of this role."))
     return blocks
 
 
@@ -898,14 +774,6 @@ def create_notion_page(
     emoji_map = {"Yes": "✅", "Maybe": "🤔", "No": "❌"}
     action_emoji = emoji_map.get(_safe_str(getattr(resp, "should_apply", None)), "❓")
 
-    cap_explainer = None
-    if isinstance(public_contract, dict):
-        cap_explainer = _safe_str(_get_in(public_contract, ["score", "cap_explainer"], None)).strip()
-    if not cap_explainer:
-        cap_val = getattr(resp, "cap", None)
-        if isinstance(cap_val, int) and cap_val < 100:
-            cap_explainer = f"Capped to {cap_val} due to seniority gap."
-
     blocks: List[dict] = [
         _notion_heading(f"{action_emoji} Recommendation: {getattr(resp, 'should_apply', 'No')}", level=1),
         {
@@ -915,7 +783,6 @@ def create_notion_page(
                 "icon": {"emoji": "📊"},
                 "rich_text": _notion_rich_text(
                     f"Final Score: {getattr(resp, 'final_score', 0)}/100"
-                    + (f" • {cap_explainer}" if cap_explainer else "")
                 ),
             },
         },
@@ -989,28 +856,6 @@ def create_notion_page(
             blocks.append(_notion_divider())
             blocks.extend(dc_blocks)
             blocks.append(_notion_divider())
-
-    blocks.append(
-        {
-            "object": "block",
-            "type": "toggle",
-            "toggle": {
-                "rich_text": _notion_rich_text("🔧 Raw Debug Data"),
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "code",
-                        "code": {
-                            "language": "json",
-                            "rich_text": _notion_rich_text(
-                                json.dumps(getattr(resp, "raw_json", {}), ensure_ascii=False, indent=2)[:2000]
-                            ),
-                        },
-                    }
-                ],
-            },
-        }
-    )
 
     blocks = _trim_blocks_for_notion(blocks, 100)
 

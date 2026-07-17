@@ -21,9 +21,15 @@ def test_tool_hit_from_candidate_text():
         DomainRequirement(
             name="Generative AI Development",
             importance="should",
-            evidence_quote="",
+            evidence_quote="Experience with Gemini",
             evidence_level="anchored",
-            examples=[ToolEvidence(name="Gemini", importance="should", evidence_quote="")],
+            examples=[
+                ToolEvidence(
+                    name="Gemini",
+                    importance="should",
+                    evidence_quote="Experience with Gemini",
+                )
+            ],
         )
     ]
     ir = _make_ir(domains)

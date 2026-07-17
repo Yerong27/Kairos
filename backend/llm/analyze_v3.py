@@ -110,13 +110,6 @@ def _detect_job_family(text: str) -> str:
     return "general"
 
 
-_JD_TOOL_PREFIXES = (
-    "devsecops:",
-    "cloud:",
-    "architectures:",
-    "desirable:",
-)
-
 _JD_TOOL_IGNORE = {
     "tool",
     "tools",
@@ -131,50 +124,7 @@ _JD_TOOL_IGNORE = {
     "frameworks",
     "stack",
     "planning",
-    "llm",
-    "llms",
-    "agentic system",
-    "agentic systems",
-    # File/data formats alone are weak hiring signals and create noisy
-    # "missing skill" output when a JD merely lists configuration examples.
-    "yaml",
-    "json",
 }
-
-
-_JD_TOOL_ALIAS_MAP = {
-    "actions": ["GitHub Actions"],
-    "pipelines": ["CI/CD Pipelines"],
-    "actions/pipelines": ["GitHub Actions", "CI/CD Pipelines"],
-    "github": ["GitHub"],
-    "gitlab": ["GitLab"],
-    "azure devops": ["Azure DevOps"],
-    "github/gitlab/azure devops": ["GitHub", "GitLab", "Azure DevOps"],
-    "iac": ["IaC"],
-    "terraform": ["Terraform"],
-    "sast": ["SAST"],
-    "dast": ["DAST"],
-    "sca": ["SCA"],
-    "sast/dast/sca": ["SAST", "DAST", "SCA"],
-    "secrets management": ["Secrets Management"],
-    "rest": ["REST"],
-    "grpc": ["gRPC"],
-    "event driven": ["Event-driven"],
-    "event-driven": ["Event-driven"],
-    "microservices": ["Microservices"],
-    "fastapi/fastmcp": ["FastAPI", "FastMCP"],
-    "react + typescript": ["React", "TypeScript"],
-    "react+typescript": ["React", "TypeScript"],
-    "rdbms": ["Relational Databases"],
-    "relational": ["Relational Databases"],
-    "relational database": ["Relational Databases"],
-    "relational databases": ["Relational Databases"],
-    "relational database management system": ["Relational Databases"],
-    "relational database management systems": ["Relational Databases"],
-    "nosql database": ["NoSQL Databases"],
-    "nosql databases": ["NoSQL Databases"],
-}
-
 
 def _normalize_tool_token(tok: str) -> List[str]:
     t = (tok or "").strip()
@@ -197,31 +147,45 @@ def _normalize_tool_token(tok: str) -> List[str]:
     key = t.lower()
     if key in _JD_TOOL_IGNORE:
         return []
-    if key in _JD_TOOL_ALIAS_MAP:
-        return _JD_TOOL_ALIAS_MAP[key]
-    if "+" in t:
-        out: List[str] = []
-        for part in [p.strip() for p in t.split("+") if p.strip()]:
-            out.extend(_normalize_tool_token(part))
-        return out
     return [t]
 
 
 def extract_tools_from_jd(page_text: str) -> List[str]:
+    """Extract explicit keywords without relying on an industry tool list.
+
+    Complete requirements come from the grounded domain extraction. This
+    helper only captures short, explicitly labelled/cued keywords. Illustrative
+    lists introduced by "such as"/"including" stay attached to their parent
+    requirement instead of becoming individual missing skills.
+    """
     if not (page_text or "").strip():
         return []
     tools: List[str] = []
+
+    acronym_aliases: Dict[str, str] = {}
+    for match in re.finditer(
+        r"\b([A-Za-z][A-Za-z0-9&/\-]*(?:\s+[A-Za-z][A-Za-z0-9&/\-]*){1,7})"
+        r"\s*\(\s*([A-Z][A-Z0-9&/\-]{1,11})\s*\)",
+        page_text,
+    ):
+        long_form = _normalize_whitespace(match.group(1))
+        long_form = re.sub(
+            r"^(?:skilled in|proficient in|proficiency in|experience with|experience using|"
+            r"hands-on experience with|familiar with|knowledge of|certified in|"
+            r"certification in|licensed in)\s+",
+            "",
+            long_form,
+            flags=re.IGNORECASE,
+        ).strip()
+        acronym = match.group(2).strip()
+        if long_form and acronym:
+            acronym_aliases[acronym.lower()] = long_form
+
     def _expand_tool_chunk(chunk: str) -> List[str]:
         c = (chunk or "").strip()
         if not c:
             return []
         c = re.sub(r"^(?:and|or)\s+", "", c, flags=re.IGNORECASE).strip()
-        full_key = c.lower()
-        full_key = re.sub(r"\s*/\s*", "/", full_key)
-        full_key = re.sub(r"\s+", " ", full_key).strip()
-        if full_key in _JD_TOOL_ALIAS_MAP:
-            return _JD_TOOL_ALIAS_MAP[full_key]
-
         base = c
         inner = ""
         if "(" in c and ")" in c:
@@ -229,65 +193,66 @@ def extract_tools_from_jd(page_text: str) -> List[str]:
             inner = c.split("(", 1)[1].split(")", 1)[0].strip()
 
         items: List[str] = []
-        for p in re.split(r"[|/\\+]", base):
-            items.extend(_normalize_tool_token(p))
-        if inner:
+        base_key = re.sub(r"\s+", " ", base).strip().lower()
+        if inner and inner.lower() in acronym_aliases:
+            items.extend(_normalize_tool_token(acronym_aliases[inner.lower()]))
+        else:
+            items.extend(_normalize_tool_token(base))
+        # Parenthetical examples such as "IaC (Terraform)" are distinct
+        # explicit terms; acronym expansions are already merged above.
+        if inner and inner.lower() not in acronym_aliases and inner.lower() != base_key:
             items.extend(_normalize_tool_token(inner))
         return [x for x in items if x]
 
+    example_marker = re.compile(r"\b(such as|including|e\.g\.|for example|like)\b", re.IGNORECASE)
+    label_cues = re.compile(
+        r"\b(skill|tool|software|system|platform|certification|licen[cs]e|language|"
+        r"technology|method|methodology|application)\b",
+        re.IGNORECASE,
+    )
+
+    # Structured lists work for any profession: "Software: Excel, SAP",
+    # "Certifications: CPA, CFA", "Methods: Agile, Six Sigma".
     for ln in page_text.splitlines():
         if not ln.strip():
             continue
-        low = ln.strip().lower()
-        if not any(low.startswith(p) for p in _JD_TOOL_PREFIXES):
+        match = re.match(r"^\s*([^:\n]{2,45})\s*:\s*(.+)$", ln)
+        if not match:
             continue
-        _, _, rest = ln.partition(":")
-        if not rest.strip():
+        label, rest = match.group(1).strip(), match.group(2).strip()
+        list_like = len(re.findall(r"[,;|]", rest)) >= 1
+        if not label_cues.search(label) and not list_like:
             continue
-        parts = [p.strip() for p in rest.split(",") if p.strip()]
+        if example_marker.search(rest):
+            continue
+        parts = [p.strip() for p in re.split(r"[,;|]|\s+\band\b\s+", rest) if p.strip()]
         for p in parts:
             p2 = p.strip().strip(".:;")
             for norm in _expand_tool_chunk(p2):
                 tools.append(norm)
 
-    for ln in page_text.splitlines():
-        low = ln.lower()
-        if "such as" in low:
-            such_as_pos = low.find("such as")
-            lead = low[:such_as_pos]
-            # "Concepts such as virtualization..." is useful JD context, but
-            # those nouns are not necessarily tools. Only parse examples when
-            # the sentence explicitly introduces a technical/tool category.
-            if not re.search(
-                r"\b(tool|technology|technologies|language|framework|platform|database|"
-                r"infrastructure as code|configuration technolog)",
-                lead,
-            ):
-                continue
-            tail = ln[such_as_pos + len("such as") :]
-            if tail:
-                parts = [p.strip() for p in tail.split(",") if p.strip()]
-                for p in parts:
-                    for norm in _expand_tool_chunk(p.strip().strip(".:;")):
-                        tools.append(norm)
-
-    # Generic pattern-based extraction from JD lines
-    tool_patterns = [
-        r"\b(skilled in|proficient in|experience with|hands-on experience with|familiar with|knowledge of|tools like|frameworks like|platforms like)\b",
-        r"\b(languages|tech stack|stack)\b",
-    ]
-    tool_re = re.compile("|".join(tool_patterns), re.IGNORECASE)
+    # Direct requirement cues are industry-neutral. Example lists are skipped:
+    # "experience with Excel" is explicit; "tools such as Excel" is not.
+    cue_re = re.compile(
+        r"\b(skilled in|proficient in|proficiency in|experience with|experience using|"
+        r"hands-on experience with|familiar with|knowledge of|certified in|"
+        r"certification in|licensed in)\b",
+        re.IGNORECASE,
+    )
     for ln in page_text.splitlines():
         if not ln.strip():
             continue
-        m = tool_re.search(ln)
+        m = cue_re.search(ln)
         if not m:
+            continue
+        if example_marker.search(ln[m.end() :]):
             continue
         tail = ln[m.end():].strip()
         tail = re.sub(r"^[\s:\-–—]+", "", tail)
+        tail = re.split(r"(?<=[.!?])\s+", tail, maxsplit=1)[0].strip()
         if not tail:
             continue
-        parts = [p.strip() for p in tail.split(",") if p.strip()]
+        parts = [p.strip() for p in re.split(r"[,;|]|\s+\band\b\s+", tail) if p.strip()]
         for p in parts:
             for norm in _expand_tool_chunk(p.strip().strip(".:;")):
                 tools.append(norm)
@@ -295,7 +260,12 @@ def extract_tools_from_jd(page_text: str) -> List[str]:
     out: List[str] = []
     seen = set()
     for t in tools:
-        k = t.strip().lower()
+        k = re.sub(r"[^a-z0-9+#]+", " ", t.strip().lower()).strip()
+        k = re.sub(r"\s+", " ", k)
+        if k in acronym_aliases:
+            canonical = acronym_aliases[k]
+            k = re.sub(r"[^a-z0-9+#]+", " ", canonical.lower()).strip()
+            t = canonical
         if not k or k in seen:
             continue
         seen.add(k)

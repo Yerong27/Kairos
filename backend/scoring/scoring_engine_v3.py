@@ -408,7 +408,13 @@ def _get_explicit_jd_tools(job_ir: Any) -> List[str]:
         tools = raw.get("tools_in_jd") if isinstance(raw.get("tools_in_jd"), list) else None
         if tools is None and isinstance(raw.get("job"), dict):
             tools = raw["job"].get("tools_in_jd")
-    normalized = _canonicalize_skill_list(_normalize_skill_list(tools if isinstance(tools, list) else []))
+    # Preserve literal alternatives/groups ("Relational / NoSQL database")
+    # instead of splitting them into fragments that lose shared context.
+    normalized = _canonicalize_skill_list(
+        [str(item).strip() for item in tools if str(item).strip()]
+        if isinstance(tools, list)
+        else []
+    )
     seen = set()
     out: List[str] = []
     for tool in normalized:
@@ -417,6 +423,30 @@ def _get_explicit_jd_tools(job_ir: Any) -> List[str]:
             seen.add(key)
             out.append(tool)
     return out
+
+
+def _is_illustrative_example(tool_name: str, evidence_quote: Optional[str]) -> bool:
+    """True when a term appears only after an example marker in its JD quote."""
+    quote = str(evidence_quote or "")
+    if not quote.strip() or not tool_name.strip():
+        return False
+    low = quote.lower()
+    marker = re.search(r"\b(such as|including|e\.g\.|for example|like)\b", low)
+    if not marker:
+        return False
+    tool_pos = low.find(tool_name.lower())
+    return tool_pos < 0 or marker.start() < tool_pos
+
+
+def _is_explicit_named_example(tool_name: str, evidence_quote: Optional[str]) -> bool:
+    """Avoid turning LLM-normalized capability labels into fake keywords."""
+    quote = str(evidence_quote or "")
+    name = str(tool_name or "").strip()
+    if not quote or not name:
+        return False
+    # Exact case-sensitive presence is a useful industry-neutral signal for
+    # named software, credentials, standards, acronyms, and proper nouns.
+    return name in quote
 
 def _get_job_level(job_ir: Any) -> SeniorityLabel:
     lvl = _get_field(job_ir, "job_seniority_signal", None)
@@ -2339,6 +2369,10 @@ def score_ir_v3(
         for ex in (d.examples or []):
             ex_name_raw = getattr(ex, "name", "") or ""
             if not ex_name_raw.strip():
+                continue
+            if _is_illustrative_example(ex_name_raw, getattr(ex, "evidence_quote", None)):
+                continue
+            if not _is_explicit_named_example(ex_name_raw, getattr(ex, "evidence_quote", None)):
                 continue
             ex_names = _expand_tool_names(ex_name_raw)
             if not ex_names:

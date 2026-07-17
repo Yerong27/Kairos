@@ -4,38 +4,11 @@ import re
 from typing import Dict
 
 
-_DOMAIN_ALIASES: Dict[str, str] = {
-    "finance domain knowledge": "Financial Domain Knowledge",
-    "financial domain knowledge": "Financial Domain Knowledge",
-}
-
-_TOOL_ALIASES: Dict[str, str] = {
-    "api gateway": "AWS API Gateway",
-    "aws api gateway": "AWS API Gateway",
-    "s3": "AWS S3",
-    "aws s3": "AWS S3",
-    "lambda": "AWS Lambda",
-    "aws lambda": "AWS Lambda",
-    "iam": "AWS IAM",
-    "aws iam": "AWS IAM",
-    "rag": "Retrieval-Augmented Generation",
-    "retrieval augmented generation": "Retrieval-Augmented Generation",
-    "vector based search": "Vector Search",
-    "vector-based search": "Vector Search",
-    "vector search": "Vector Search",
-    "openai gpt-4": "GPT-4",
-    "gpt-4": "GPT-4",
-    "google gemini": "Gemini",
-    "gemini": "Gemini",
-    "rdbms": "Relational Databases",
-    "relational": "Relational Databases",
-    "relational database": "Relational Databases",
-    "relational databases": "Relational Databases",
-    "relational database management system": "Relational Databases",
-    "relational database management systems": "Relational Databases",
-    "nosql database": "NoSQL Databases",
-    "nosql databases": "NoSQL Databases",
-}
+# Keep this table deliberately small and industry-neutral. Domain-specific
+# equivalence should come from grounded context (including "Long Form (ABC)")
+# rather than an ever-growing list of IT product names.
+_DOMAIN_ALIASES: Dict[str, str] = {}
+_TOOL_ALIASES: Dict[str, str] = {}
 
 
 def _canon_key(name: str) -> str:
