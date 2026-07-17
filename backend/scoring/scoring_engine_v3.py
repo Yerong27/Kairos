@@ -3585,7 +3585,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "2.5"},
+        "contract": {"name": "kairos_v3_public", "version": "2.6"},
         "decision": decision,
         "score": score,
         "analysis_quality": {
