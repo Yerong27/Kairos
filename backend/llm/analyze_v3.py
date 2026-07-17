@@ -68,6 +68,7 @@ from backend.ir.canonicalize import canon_tool
 JOB_ANALYSIS_MODEL = (os.getenv("GEMINI_JOB_MODEL") or "gemini-3.5-flash").strip()
 JOB_ANALYSIS_TIMEOUT_SECONDS = 60
 JOB_ANALYSIS_MAX_ATTEMPTS = 2
+JOB_ANALYSIS_MAX_QUOTA_WAIT_SECONDS = 30.0
 CATALOG_DIR = pathlib.Path(__file__).parent.parent / "config" / "catalogs"
 _DOMAIN_CATALOG = None
 
@@ -77,6 +78,33 @@ def _ensure_gemini_configured() -> None:
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not set in environment/.env")
     genai.configure(api_key=key)
+
+
+def _short_quota_retry_delay(exc: Exception) -> Optional[float]:
+    """Return a bounded server-provided RetryInfo delay for a 429."""
+    for detail in getattr(exc, "details", None) or []:
+        retry_delay = getattr(detail, "retry_delay", None)
+        if retry_delay is None:
+            continue
+        seconds = float(getattr(retry_delay, "seconds", 0) or 0)
+        nanos = float(getattr(retry_delay, "nanos", 0) or 0)
+        delay = seconds + nanos / 1_000_000_000.0
+        if 0.0 < delay <= JOB_ANALYSIS_MAX_QUOTA_WAIT_SECONDS:
+            return delay
+
+    # google-generativeai sometimes exposes RetryInfo only in the rendered
+    # exception text.
+    match = re.search(
+        r"(?:please\s+)?retry\s+in\s+([0-9]+(?:\.[0-9]+)?)s\b",
+        str(exc or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    delay = float(match.group(1))
+    if 0.0 < delay <= JOB_ANALYSIS_MAX_QUOTA_WAIT_SECONDS:
+        return delay
+    return None
 
 
 def _detect_job_family(text: str) -> str:
@@ -1312,6 +1340,14 @@ OUTPUT LANGUAGE: {output_language}
                     request_options={"timeout": JOB_ANALYSIS_TIMEOUT_SECONDS},
                 )
                 break
+            except google_api_exceptions.TooManyRequests as exc:
+                delay = _short_quota_retry_delay(exc)
+                if (
+                    delay is None
+                    or attempt + 1 >= JOB_ANALYSIS_MAX_ATTEMPTS
+                ):
+                    raise
+                time.sleep(delay + 0.25)
             except transient_errors:
                 if attempt + 1 >= JOB_ANALYSIS_MAX_ATTEMPTS:
                     raise

@@ -477,6 +477,45 @@ def test_gemini_quota_error_is_not_blindly_retried():
     sleep.assert_not_called()
 
 
+def test_short_server_provided_quota_delay_is_waited_once():
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, _prompt, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise google_api_exceptions.TooManyRequests(
+                    "Quota exceeded. Please retry in 16.340519688s."
+                )
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "job_title": "Engineer",
+                        "company": "Example",
+                        "job_seniority_signal": "mid",
+                        "domain_requirements": [],
+                    }
+                )
+            )
+
+    with patch.object(analyzer, "_ensure_gemini_configured"), patch.object(
+        analyzer.genai, "GenerativeModel", FakeModel
+    ), patch.object(analyzer.time, "sleep") as sleep:
+        result = analyzer._extract_with_gemini_v3(
+            "Build reliable services.",
+            title="Engineer",
+            output_language="en",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    assert result["analysis_status"] == "success"
+    assert len(calls) == 2
+    sleep.assert_called_once_with(16.590519688)
+
+
 def test_complete_cross_layer_requirement_matrix_preserves_detail_and_keywords():
     clauses = [
         (
