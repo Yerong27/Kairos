@@ -15,6 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+from backend.ir.candidate_profile import CandidateEvidenceClaim
 
 
 # -----------------------------
@@ -26,6 +27,16 @@ SeniorityLabel = Literal["intern", "junior", "mid", "senior", "lead", "principal
 # lightweight domain facet for explainability / safer importance rules
 DomainFacet = Literal["technical", "process", "people", "unknown"]
 SupportLevel = Literal["strong", "weak", "none"]
+RequirementType = Literal[
+    "capability",
+    "tool",
+    "credential",
+    "education",
+    "experience",
+    "work_condition",
+    "responsibility",
+    "other",
+]
 
 # Phase 3 Protocol: 4-Level Evidence
 EvidenceLevel = Literal["exact", "anchored", "weak", "none"]
@@ -58,6 +69,11 @@ class DomainRequirement(BaseModel):
 
     name: str = Field(alias="domain", description="Portable, industry-agnostic domain name (e.g. 'Project Management')")
     importance: Importance
+    requirement_type: RequirementType = "capability"
+    alternatives: List[str] = Field(
+        default_factory=list,
+        description="Literal OR alternatives that can satisfy the same requirement",
+    )
 
     # Phase 3: Canonical ID & Evidence Protocol
     domain_id: Optional[str] = Field(default=None, description="Canonical Domain ID from Catalog")
@@ -122,6 +138,10 @@ class AnalyzeIRv3(BaseModel):
     candidate_seniority_signal: Optional[str] = Field(description="Verbatim title-like string from candidate profile", default="N/A")
 
     candidate_skills: List[str] = Field(default_factory=list, description="Extracted candidate skills")
+    candidate_evidence_claims: List[CandidateEvidenceClaim] = Field(
+        default_factory=list,
+        description="Resume-grounded claims produced once per resume hash",
+    )
 
     domain_requirements: List[DomainRequirement] = Field(default_factory=list, description="List of extracted domain requirements")
     tools_in_jd: List[str] = Field(default_factory=list, description="Tools explicitly mentioned in the JD")
@@ -149,6 +169,7 @@ __all__ = [
     "Importance",
     "SeniorityLabel",
     "DomainFacet",
+    "RequirementType",
     "EvidenceLevel",
     "ToolEvidence",
     "DomainRequirement",

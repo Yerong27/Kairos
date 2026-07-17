@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.ir.schema_v3 import AnalyzeIRv3, DomainRequirement, ToolEvidence
-from backend.ir.domain_catalog import DomainCatalog, adjudicate_domains
+from backend.ir.domain_catalog import CatalogDomain, DomainCatalog, adjudicate_domains
 from backend.llm import analyze_v3 as analyzer
 from backend.notion import writer
 from backend.scoring.scoring_engine_v3 import (
@@ -63,6 +63,7 @@ def test_top_level_gemini_schema_survives_normalization():
 
     assert [d.name for d in result.domain_requirements] == ["API Development"]
     assert "Python" in result.candidate_skills
+    assert len(result.candidate_evidence_claims) == 1
     assert result.ownership_and_scope.ownership.level_val == 2
     assert result.analysis_status == "success"
 
@@ -167,6 +168,21 @@ def test_jd_tool_extraction_deduplicates_databases_and_drops_low_signal_concepts
     assert "containers" not in tools
 
 
+def test_illustrative_terms_are_recovered_for_parent_matching_only():
+    quote = (
+        "Infrastructure technologies such as YAML, JSON, Ansible, "
+        "CloudFormation or Terraform"
+    )
+
+    assert analyzer._extract_illustrative_terms(quote) == [
+        "YAML",
+        "JSON",
+        "Ansible",
+        "CloudFormation",
+        "Terraform",
+    ]
+
+
 def test_grounded_requirement_not_in_catalog_is_preserved_and_verified():
     requirement = DomainRequirement(
         name="Operating System Management",
@@ -190,6 +206,41 @@ def test_grounded_requirement_not_in_catalog_is_preserved_and_verified():
     assert len(result) == 1
     assert result[0].domain_id.startswith("custom:")
     assert result[0].evidence_level == "exact"
+    assert result[0].evidence_status == "verified"
+
+
+def test_explicit_grounded_must_is_not_downgraded_by_catalog_or_facet():
+    requirement = DomainRequirement(
+        name="Learning & Adaptability",
+        importance="must",
+        evidence_quote="A desire to learn new technologies is a must.",
+        facet="people",
+    )
+    catalog = DomainCatalog(
+        domains={
+            "learning_adaptability": CatalogDomain(
+                id="learning_adaptability",
+                label="Learning & Adaptability",
+                facet="people",
+                allowed_must=False,
+                aliases_strong=["learning & adaptability"],
+                aliases_weak=[],
+                domain_type="soft",
+                default_weight=1.0,
+            )
+        },
+        aliases_global={},
+        allowed_must_domains=[],
+        max_must_count=None,
+    )
+
+    result = adjudicate_domains(
+        [requirement],
+        jd_text="A desire to learn new technologies is a must.",
+        catalog=catalog,
+    )
+
+    assert result[0].importance == "must"
     assert result[0].evidence_status == "verified"
 
 

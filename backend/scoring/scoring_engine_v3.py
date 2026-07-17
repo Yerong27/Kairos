@@ -34,7 +34,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
 from backend.ir.schema_v3 import AnalyzeIRv3, DomainRequirement, ToolEvidence, SeniorityLabel
+from backend.ir.candidate_profile import CandidateEvidenceClaim
 from backend.ir.canonicalize import canon_domain, canon_tool
+from backend.scoring.evidence_matcher import EvidenceMatchDecision, match_requirement_to_evidence
 
 ShouldApply = Literal["Yes", "Maybe", "No"]
 RiskLevel = Literal["none", "low", "medium", "high"]
@@ -399,6 +401,21 @@ def _get_candidate_skills(job_ir: Any, candidate_skills: Optional[List[str]] = N
         seen.add(key)
         out.append(t)
     return out
+
+
+def _get_candidate_evidence_claims(job_ir: Any) -> List[CandidateEvidenceClaim]:
+    raw_claims = _get_field(job_ir, "candidate_evidence_claims", None)
+    if not isinstance(raw_claims, list):
+        return []
+    claims: List[CandidateEvidenceClaim] = []
+    for item in raw_claims:
+        try:
+            claim = item if isinstance(item, CandidateEvidenceClaim) else CandidateEvidenceClaim.model_validate(item)
+        except Exception:
+            continue
+        if claim.resume_quote.strip():
+            claims.append(claim)
+    return claims
 
 
 def _get_explicit_jd_tools(job_ir: Any) -> List[str]:
@@ -2090,15 +2107,21 @@ def score_ir_v3(
         candidate_sources["raw_llm"] = True
 
     base_skills = _get_candidate_skills(job_ir, candidate_skills)
+    structured_claims = _get_candidate_evidence_claims(job_ir)
 
     extracted_claims: List[str] = []
     if isinstance(candidate_text, str) and candidate_text.strip():
         extracted_claims = _extract_claims_from_candidate_text(candidate_text)
 
-    # Merge + de-dupe
-    merged: List[str] = []
+    # Named skills remain useful for exact keyword matching, but they no
+    # longer prove broad requirements. Domain matching uses grounded claims.
+    tool_inputs: List[str] = []
     seen = set()
-    for s in (base_skills or []) + (extracted_claims or []):
+    for s in (
+        (base_skills or [])
+        + [claim.resume_quote for claim in structured_claims]
+        + (extracted_claims or [])
+    ):
         st = str(s).strip()
         if not st:
             continue
@@ -2106,11 +2129,11 @@ def score_ir_v3(
         if not k or k in seen:
             continue
         seen.add(k)
-        merged.append(st)
+        tool_inputs.append(st)
 
-    merged.sort(key=lambda x: x.lower())
-    cand_skills = merged
-    candidate_text_blob = " ".join(cand_skills)
+    tool_inputs.sort(key=lambda x: x.lower())
+    cand_skills = tool_inputs
+    candidate_text_blob = " ".join(tool_inputs)
     if isinstance(candidate_text, str) and candidate_text.strip():
         candidate_text_blob = (candidate_text_blob + " " + candidate_text).strip()
     domains_raw = _dedupe_domains_by_canon(_get_domains(job_ir))
@@ -2146,6 +2169,11 @@ def score_ir_v3(
         cand_numeric = _infer_job_numeric(job_level)
         cand_reason = "unknown_neutral_no_seniority_evidence"
 
+    domain_inputs = (
+        [claim.resume_quote for claim in structured_claims]
+        if structured_claims
+        else list(tool_inputs)
+    )
     (
         cand_phrases,
         cand_compacts,
@@ -2154,7 +2182,16 @@ def score_ir_v3(
         cand_entries,
         cand_avg_conf,
         cand_keyword_ratio,
-    ) = _make_candidate_index(cand_skills)
+    ) = _make_candidate_index(domain_inputs)
+    (
+        tool_cand_phrases,
+        tool_cand_compacts,
+        _tool_cand_tokens,
+        _tool_cand_text,
+        tool_cand_entries,
+        _tool_cand_avg_conf,
+        _tool_cand_keyword_ratio,
+    ) = _make_candidate_index(tool_inputs)
     explicit_jd_tools = _get_explicit_jd_tools(job_ir)
 
     gap = _seniority_gap_numeric(job_level, cand_numeric)
@@ -2200,6 +2237,8 @@ def score_ir_v3(
     domain_anchor_hits: Dict[str, List[str]] = {}
     domain_match_confidence: Dict[str, float] = {}
     domain_resume_evidence: Dict[str, List[str]] = {}
+    domain_evidence_ids: Dict[str, List[str]] = {}
+    domain_match_reasons: Dict[str, str] = {}
 
     raw_score = 0
     raw_max = 0
@@ -2276,19 +2315,34 @@ def score_ir_v3(
         anchors = _domain_anchor_terms(d)
         anchors_used[d_name or "unknown"] = anchors[:60]
 
-        dom_conf, _dom_status, dom_exact = _domain_match_confidence(
-            d,
-            anchor_terms=anchors,
-            cand_phrases=cand_phrases,
-            cand_compacts=cand_compacts,
-            cand_tokens=cand_tokens,
-            entries=cand_entries,
-            strong_threshold=DOMAIN_STRONG_THRESHOLD,
-            weak_threshold=DOMAIN_WEAK_THRESHOLD,
-            exact_floor=DOMAIN_EXACT_FLOOR,
-        )
+        evidence_decision: Optional[EvidenceMatchDecision] = None
+        if structured_claims:
+            evidence_decision = match_requirement_to_evidence(d, structured_claims)
+            dom_conf = float(evidence_decision.confidence)
+            _dom_status = {
+                "matched": "hit",
+                "partial": "soft_hit",
+                "missing": "missing",
+            }[evidence_decision.status]
+            dom_exact = evidence_decision.reason == "exact_grounded_phrase"
+            domain_resume_evidence[d_name] = list(evidence_decision.evidence_quotes)
+            domain_evidence_ids[d_name] = list(evidence_decision.evidence_ids)
+            domain_match_reasons[d_name] = evidence_decision.reason
+        else:
+            dom_conf, _dom_status, dom_exact = _domain_match_confidence(
+                d,
+                anchor_terms=anchors,
+                cand_phrases=cand_phrases,
+                cand_compacts=cand_compacts,
+                cand_tokens=cand_tokens,
+                entries=cand_entries,
+                strong_threshold=DOMAIN_STRONG_THRESHOLD,
+                weak_threshold=DOMAIN_WEAK_THRESHOLD,
+                exact_floor=DOMAIN_EXACT_FLOOR,
+            )
+            domain_resume_evidence[d_name] = _matching_candidate_evidence(anchors, cand_entries)
+            domain_match_reasons[d_name] = "legacy_flat_text_match"
         domain_match_confidence[d_name] = round(float(dom_conf), 3)
-        domain_resume_evidence[d_name] = _matching_candidate_evidence(anchors, cand_entries)
 
         # Capture anchors that actually matched (>0 confidence) for debug transparency
         matched_anchors = []
@@ -2303,8 +2357,12 @@ def score_ir_v3(
         if matched_anchors:
             domain_anchor_hits[d_name or "unknown"] = matched_anchors[:12]
 
-        strong_hit = dom_conf >= DOMAIN_STRONG_THRESHOLD
-        weak_hit = (dom_conf >= DOMAIN_WEAK_THRESHOLD) and not strong_hit
+        if evidence_decision is not None:
+            strong_hit = evidence_decision.status == "matched"
+            weak_hit = evidence_decision.status == "partial"
+        else:
+            strong_hit = dom_conf >= DOMAIN_STRONG_THRESHOLD
+            weak_hit = (dom_conf >= DOMAIN_WEAK_THRESHOLD) and not strong_hit
 
         if is_core_for_penalty:
             if dom_exact:
@@ -2387,9 +2445,9 @@ def score_ir_v3(
 
                 tool_conf = _tool_match_confidence(
                     ex_tool,
-                    cand_phrases=cand_phrases,
-                    cand_compacts=cand_compacts,
-                    entries=cand_entries,
+                    cand_phrases=tool_cand_phrases,
+                    cand_compacts=tool_cand_compacts,
+                    entries=tool_cand_entries,
                 )
 
                 tool_strong = tool_conf >= TOOL_HIT_THRESHOLD
@@ -2437,9 +2495,9 @@ def score_ir_v3(
         tool_should_examples.append(tool_name)
         tool_conf = _tool_match_confidence(
             ToolEvidence(name=tool_name, importance="should", evidence_quote=None),
-            cand_phrases=cand_phrases,
-            cand_compacts=cand_compacts,
-            entries=cand_entries,
+            cand_phrases=tool_cand_phrases,
+            cand_compacts=tool_cand_compacts,
+            entries=tool_cand_entries,
         )
         if tool_conf <= 0.0 and candidate_text_blob and _tool_text_hit(tool_name, candidate_text_blob):
             tool_conf = TOOL_HIT_THRESHOLD
@@ -2670,6 +2728,12 @@ def score_ir_v3(
                 "match_confidence": domain_match_confidence.get(name, 0.0),
                 "jd_evidence": str(getattr(domain, "evidence_quote", "") or "")[:500],
                 "resume_evidence": domain_resume_evidence.get(name, []),
+                "resume_evidence_ids": domain_evidence_ids.get(name, []),
+                "match_reason": domain_match_reasons.get(name, "unverified"),
+                "requirement_type": str(
+                    getattr(domain, "requirement_type", "capability") or "capability"
+                ),
+                "alternatives": list(getattr(domain, "alternatives", None) or [])[:10],
                 "tools": tools[:15],
             }
         )
@@ -2685,6 +2749,15 @@ def score_ir_v3(
             1 for x in requirement_matrix if x["importance"] == "must" and x["status"] == "missing"
         ),
     }
+    unsupported_requirement_matches = (
+        sum(
+            1
+            for item in requirement_matrix
+            if item["status"] in ("matched", "partial") and not item.get("resume_evidence_ids")
+        )
+        if structured_claims
+        else 0
+    )
     tool_matrix = [
         {
             "name": tool,
@@ -2719,6 +2792,11 @@ def score_ir_v3(
             "cap_applied": (cap < 100),
             "blocked_by_seniority": (bucket == "cliff"),
             "signal_insufficient": signal_insufficient,
+            "matcher_mode": (
+                "evidence_grounded_v2" if structured_claims else "legacy_flat_text"
+            ),
+            "candidate_evidence_claim_count": len(structured_claims),
+            "unsupported_requirement_matches": unsupported_requirement_matches,
             "seniority_cap_base": seniority_cap_base,
             "seniority_cap_uplift": seniority_cap_uplift,
             "seniority_cap_final": cap,
@@ -3276,13 +3354,27 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "1.3"},
+        "contract": {"name": "kairos_v3_public", "version": "2.0"},
         "decision": decision,
         "score": score,
         "analysis_quality": {
-            "status": "degraded" if signal_insufficient else "complete",
-            "score_reliable": not signal_insufficient,
+            "status": (
+                "degraded"
+                if signal_insufficient or int(constraints.get("unsupported_requirement_matches", 0) or 0) > 0
+                else "complete"
+            ),
+            "score_reliable": (
+                not signal_insufficient
+                and int(constraints.get("unsupported_requirement_matches", 0) or 0) == 0
+            ),
             "requirements_extracted": len(requirement_matrix) if isinstance(requirement_matrix, list) else 0,
+            "matcher_mode": constraints.get("matcher_mode", "legacy_flat_text"),
+            "candidate_evidence_claims": int(
+                constraints.get("candidate_evidence_claim_count", 0) or 0
+            ),
+            "unsupported_matches": int(
+                constraints.get("unsupported_requirement_matches", 0) or 0
+            ),
         },
         "requirements": {
             "counts": requirement_counts if isinstance(requirement_counts, dict) else {},

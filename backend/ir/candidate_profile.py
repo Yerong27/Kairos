@@ -8,11 +8,22 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 CandidateProfileStatus = Literal["ready", "degraded"]
+CandidateClaimType = Literal[
+    "achievement",
+    "capability",
+    "credential",
+    "education",
+    "experience",
+    "work_condition",
+    "other",
+]
 
 
 class CandidateEvidenceClaim(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    evidence_id: str = ""
+    claim_type: CandidateClaimType = "other"
     resume_quote: str
     skills: List[str] = Field(default_factory=list)
     domains: List[str] = Field(default_factory=list)
@@ -41,4 +52,9 @@ class CandidateProfile(BaseModel):
     raw_llm_json: Optional[Dict[str, Any]] = None
 
 
-__all__ = ["CandidateEvidenceClaim", "CandidateProfile", "CandidateRole"]
+__all__ = [
+    "CandidateClaimType",
+    "CandidateEvidenceClaim",
+    "CandidateProfile",
+    "CandidateRole",
+]

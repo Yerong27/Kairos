@@ -42,6 +42,7 @@ def test_resume_parser_keeps_only_resume_grounded_claims():
         "evidence_claims": [
             {
                 "resume_quote": "Built production services with Python.",
+                "claim_type": "capability",
                 "skills": ["Python"],
                 "domains": ["API Development"],
             },
@@ -71,8 +72,14 @@ def test_resume_parser_keeps_only_resume_grounded_claims():
     ]
     assert "Python" in profile.candidate_skills
     assert "Kubernetes" not in profile.candidate_skills
+    assert profile.evidence_claims[0].claim_type == "capability"
+    assert profile.evidence_claims[0].evidence_id.startswith("ev_")
     assert profile.candidate_seniority_signal == "unknown"
     assert profile.seniority_reason == "deferred_to_job_family_analysis"
+    evidence_text = resume_analyzer.candidate_profile_evidence_text(profile)
+    assert "Built production services with Python." in evidence_text
+    assert "Candidate skills:" not in evidence_text
+    assert "Candidate domains:" not in evidence_text
 
 
 def test_resume_parser_retries_truncated_json_with_compact_prompt():

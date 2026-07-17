@@ -306,23 +306,14 @@ def adjudicate_domains(
             setattr(d, "evidence_status", "unverified")
 
         # 3. MUST Gate (Strict)
-        # Rule: importance=must requires allowed_must=True AND evidence_level IN {exact, anchored}
-        #       if catalog.allowed_must_domains is non-empty, it becomes the canonical allowlist.
+        # The catalog normalizes names; it must not decide which professions
+        # are allowed to have mandatory requirements. Only grounded evidence
+        # controls whether MUST survives.
         if getattr(d, "importance", "unknown") == "must":
             downgrade = False
             reasons = []
 
-            # Check 1: Allowed Must
-            allow_must = dom.allowed_must
-            if catalog.allowed_must_domains:
-                allow_must = allow_must and (dom.id.lower() in catalog.allowed_must_domains)
-            if dom.facet in ("people", "process"):
-                allow_must = False
-            if not allow_must:
-                downgrade = True
-                reasons.append("not_allowed_must")
-
-            # Check 2: Evidence Strength
+            # Evidence strength
             ev_level = getattr(d, "evidence_level", "none")
             if ev_level not in ("exact", "anchored"):
                 downgrade = True

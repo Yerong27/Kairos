@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from typing import Any, Dict, List
@@ -12,8 +13,8 @@ from google.generativeai.types import GenerationConfig
 
 from backend.ir.candidate_profile import CandidateEvidenceClaim, CandidateProfile, CandidateRole
 from backend.ir.canonicalize import canon_domain, canon_tool
-CANDIDATE_PROFILE_SCHEMA_VERSION = "1.0"
-CANDIDATE_PROFILE_PROMPT_VERSION = "1.2"
+CANDIDATE_PROFILE_SCHEMA_VERSION = "2.0"
+CANDIDATE_PROFILE_PROMPT_VERSION = "2.1"
 CANDIDATE_PROFILE_MODEL = (os.getenv("GEMINI_RESUME_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
 
 
@@ -70,6 +71,12 @@ STRICT RULES:
 6. Return at most 8 skills and 4 domains per evidence claim.
 7. Do not assign one global seniority level. Seniority depends on the target job
    family and is calculated locally when a job is analyzed.
+8. Classify every evidence claim using one general claim_type. Do not invent
+   evidence IDs; Kairos creates them deterministically after validation.
+9. `domains` must contain only portable capabilities directly demonstrated by
+   the quote. A named product may support its conventional capability (for
+   example, a container tool may support Containerization), but do not infer
+   unrelated or broader expertise.
 
 <resume>
 {text[:50000]}
@@ -82,6 +89,7 @@ OUTPUT JSON ONLY:
   "evidence_claims": [
     {{
       "resume_quote": "short verbatim resume substring",
+      "claim_type": "achievement|capability|credential|education|experience|work_condition|other",
       "skills": ["string"],
       "domains": ["string"],
       "role": "string or null"
@@ -159,8 +167,23 @@ def analyze_resume(resume_text: str) -> CandidateProfile:
             continue
         skills = _dedupe([canon_tool(str(x)) or str(x) for x in (item.get("skills") or [])])[:20]
         domains = _dedupe([canon_domain(str(x)) or str(x) for x in (item.get("domains") or [])])[:12]
+        claim_type = _normalize(item.get("claim_type")).lower()
+        if claim_type not in {
+            "achievement",
+            "capability",
+            "credential",
+            "education",
+            "experience",
+            "work_condition",
+            "other",
+        }:
+            claim_type = "other"
+        evidence_key = f"{quote.lower()}|{_normalize(item.get('role')).lower()}"
+        evidence_id = "ev_" + hashlib.sha256(evidence_key.encode("utf-8")).hexdigest()[:12]
         claims.append(
             CandidateEvidenceClaim(
+                evidence_id=evidence_id,
+                claim_type=claim_type,
                 resume_quote=quote,
                 skills=skills,
                 domains=domains,
@@ -226,11 +249,10 @@ def analyze_resume(resume_text: str) -> CandidateProfile:
 
 def candidate_profile_evidence_text(profile: CandidateProfile | Dict[str, Any]) -> str:
     parsed = profile if isinstance(profile, CandidateProfile) else CandidateProfile.model_validate(profile)
-    lines = [claim.resume_quote for claim in parsed.evidence_claims]
-    if parsed.candidate_skills:
-        lines.append("Candidate skills: " + ", ".join(parsed.candidate_skills))
-    if parsed.candidate_domains:
-        lines.append("Candidate domains: " + ", ".join(parsed.candidate_domains))
+    lines = [
+        f"[{claim.evidence_id or 'legacy'}] {claim.resume_quote}"
+        for claim in parsed.evidence_claims
+    ]
     return "\n".join(_dedupe(lines))
 
 

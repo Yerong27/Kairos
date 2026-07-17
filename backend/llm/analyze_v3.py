@@ -273,6 +273,23 @@ def extract_tools_from_jd(page_text: str) -> List[str]:
     return out
 
 
+def _extract_illustrative_terms(evidence_quote: str) -> List[str]:
+    """Extract example terms while keeping them attached to the parent requirement."""
+    quote = str(evidence_quote or "").strip()
+    marker = re.search(r"\b(such as|including|e\.g\.|for example)\b", quote, re.IGNORECASE)
+    if not marker:
+        return []
+    tail = quote[marker.end() :].strip()
+    if ")" in tail:
+        tail = tail.split(")", 1)[0]
+    tail = tail.strip(" .:;()[]")
+    values: List[str] = []
+    for part in re.split(r"[,;]|\s+\bor\b\s+|\s+\band\b\s+", tail, flags=re.IGNORECASE):
+        for normalized in _normalize_tool_token(part.strip(" .:;()[]")):
+            values.append(normalized)
+    return _dedupe_keep_order(values)[:16]
+
+
 def _get_domain_catalog(job_family: str):
     global _DOMAIN_CATALOG
     if _DOMAIN_CATALOG is None:
@@ -908,39 +925,34 @@ def _extract_with_gemini_v3(
 
 Your task: extract a *scorable* IR for ANY professional job.
 
-GLOBAL RULES (STRICT KAIROS LOGIC):
+GLOBAL RULES:
 
-1) CORE PHILOSOPHY (Domain vs Tools):
-   - **Domains** are "Capabilities" (e.g., "Cloud Computing", "CI/CD", "Project Management").
-     They determine if a candidate CAN do the job.
-   - **Tools** are "Implementations" or "Examples" (e.g., "AWS", "GitHub Actions", "Jira").
-     They are bonus matches only.
-   - NEVER extract a specific Tool as a Domain Name (e.g., Domain must be "Cloud Platforms", NOT "AWS").
+1) ATOMIC REQUIREMENTS:
+   - Extract every independently matchable requirement across ANY profession.
+   - One item must represent one capability, credential, education condition,
+     experience condition, work condition, responsibility, or explicitly
+     required named tool/system.
+   - Do not merge distinct requirements into a broad umbrella merely because
+     they belong to the same industry.
+   - Do not invent a requirement that lacks a verbatim evidence_quote.
 
 2) IMPORTANCE HIERARCHY:
-   - **"must"**: HARD THRESHOLD. Missing this means the candidate is unqualified.
-     Criteria: explicit "Must Have", "Required", "Minimum Qualifications" section.
-     **EXCEPTION For SENIOR+ Roles**: Key strategic/leadership responsibilities (e.g., "Define architecture", "Mentor team", "Drive strategy") are MUSTs, even if listed under "Responsibilities".
-   - **"should"**: Core capability but not a showstopper.
-     Criteria: Standard "Responsibilities", "What you'll do" sections (unless it is a key Senior requirement).
-   - **"nice_to_have"**: Bonus only.
-     Criteria: "Nice to have", "Preferred", "Bonus", "Plus", "Desirable".
+   - "must": only explicit required/essential/minimum/mandatory language.
+   - "should": responsibilities and normal expected capabilities.
+   - "nice_to_have": preferred/bonus/desirable/plus language.
+   - Do not promote a responsibility to MUST merely because it sounds senior.
 
 3) LOGICAL RULES:
-   - **Domain First**: Determine importance based on the *Capability* required.
-   - **Tools are Examples**: List specific tools in `examples[]`. They typically inherit importance "should" or "nice_to_have".
-   - **OR Logic**: If tools are connected by OR (e.g. "Python or Java"), the *Domain* ("Programming") is "must", but the specific *Tools* must NOT be marked "must" (because neither is strictly mandatory).
-
-3.5) TOOLS EXTRACTION (MANDATORY):
-   - If the JD explicitly names tools/technologies (e.g., "Python, FastAPI/FastMCP, React + TypeScript"),
-     you MUST include them under `examples[]` of the most relevant domain(s).
-   - Do NOT omit explicit tools. Include at least 5 tools if the JD lists them.
-   - Each tool in `examples[]` must include an evidence_quote copied from the JD.
+   - Put literal OR choices in `alternatives`; they satisfy one requirement.
+   - Terms introduced by "such as", "including", "e.g.", or "for example"
+     belong in `examples[]` and are not independent requirements.
+   - A named tool/system is its own requirement only when the JD explicitly
+     requires proficiency, certification, or experience with that exact item.
 
 4) COUNT & COVERAGE:
-   - Aim for comprehensive coverage without duplication (typically 6–14 Domain Requirements).
-   - Do NOT squash distinct capabilities just to save space.
-   - Do NOT omit technical/soft skills if they are core to the role.
+   - Prefer complete coverage over a target count; most JDs contain 6–20 items.
+   - Include non-technical constraints such as licences, education, work rights,
+     travel, schedule, language, physical conditions, or regulated experience.
    - Keep evidence_summary to at most 20 words and evidence_quote to the shortest
      verbatim clause that proves the requirement.
 
@@ -979,7 +991,9 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
     {{
       "domain_id": "string (optional, copy 'id' from catalog if exact match)",
       "domain": "string",
+      "requirement_type": "capability|tool|credential|education|experience|work_condition|responsibility|other",
       "importance": "must|should|nice_to_have",
+      "alternatives": ["literal OR alternative"],
       "evidence_summary": "string",
       "evidence_quote": "string",
       "examples": [
@@ -1002,7 +1016,9 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
   }}
 }}
 
-You have access to a Domain Catalog. PREFER using 'domain_id' from this list if the concept matches:
+You have access to an optional normalization catalog. Use domain_id only for an
+exact conceptual match. The catalog is not an allowlist; preserve grounded new
+requirements with domain_id omitted:
 {catalog_json_summary}
 
 OUTPUT LANGUAGE: {output_language}
@@ -1228,6 +1244,18 @@ def _safe_list(x: Any) -> List[Any]:
     return x if isinstance(x, list) else []
 
 
+def _dedupe_keep_order(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out
+
+
 def _window_has_requirement_signals(window_lower: str) -> bool:
     if not window_lower:
         return False
@@ -1301,8 +1329,6 @@ def _derive_domain_importance_from_context(
 
     # If LLM said must but we don't see requirement section nor strict language => do NOT allow must
     if base == "must":
-        if RE_PREFER_SHOULD_DOMAINS.search(name_l) or RE_PREFER_SHOULD_DOMAINS.search(q):
-            return "should"
         if not ctx_has_strict:
             return "should"
         return "must"
@@ -2148,6 +2174,29 @@ def analyze_v3(
         if imp == "unknown":
             imp = "should"
 
+        requirement_type = _normalize_whitespace(str(d.get("requirement_type") or "capability")).lower()
+        if requirement_type not in {
+            "capability",
+            "tool",
+            "credential",
+            "education",
+            "experience",
+            "work_condition",
+            "responsibility",
+            "other",
+        }:
+            requirement_type = "other"
+        alternatives = []
+        for value in _safe_list(d.get("alternatives")):
+            alternative = _normalize_whitespace(str(value))
+            if (
+                alternative
+                and len(alternative) <= 100
+                and _validate_soft_anchor(alternative, page_text_flat_lower)
+            ):
+                alternatives.append(alternative)
+        alternatives = _dedupe_keep_order(alternatives)[:10]
+
         examples: List[ToolEvidence] = []
         raw_examples = _safe_list(d.get("examples"))
 
@@ -2190,6 +2239,19 @@ def analyze_v3(
 
             examples.append(ToolEvidence(name=tname, importance=ex_imp, evidence_quote=ex_quote or None))
 
+        # Gemini may return only some members of an illustrative list. Recover
+        # the remaining literal terms deterministically, but keep them as
+        # examples of the parent requirement rather than standalone gaps.
+        for term in _extract_illustrative_terms(evidence_quote):
+            if _validate_soft_anchor(term, page_text_flat_lower):
+                examples.append(
+                    ToolEvidence(
+                        name=term,
+                        importance="should",
+                        evidence_quote=evidence_quote or None,
+                    )
+                )
+
         ex_final = _merge_examples_keep_strongest(examples)
         if len(ex_final) > 14:
             ex_final = ex_final[:14]
@@ -2219,6 +2281,8 @@ def analyze_v3(
             DomainRequirement(
                 name=name,
                 importance=imp,
+                requirement_type=requirement_type,
+                alternatives=alternatives,
                 evidence_quote=evidence_quote,
                 facet=facet,
                 anchors=anchors,
@@ -2334,6 +2398,7 @@ def analyze_v3(
         job_seniority_signal=job_seniority_signal,
         candidate_seniority_signal=candidate_seniority_signal,
         candidate_skills=candidate_skills,
+        candidate_evidence_claims=profile.evidence_claims,
         domain_requirements=domain_requirements,
         tools_in_jd=jd_tools,
         ownership_and_scope=ownership_and_scope,
