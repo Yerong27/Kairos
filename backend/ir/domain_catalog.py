@@ -211,7 +211,6 @@ def adjudicate_domains(
     catalog: DomainCatalog,
 ) -> List[DomainRequirement]:
     out: List[DomainRequirement] = []
-    must_entries: List[Tuple[int, Tuple[int, int], DomainRequirement]] = []
 
     # Parameters (Logged)
     # anchored_window = 1
@@ -271,7 +270,9 @@ def adjudicate_domains(
 
         # Apply Catalog Properties
         setattr(d, "domain_id", dom.id)
-        setattr(d, "name", dom.label) # Canonical Label
+        # Preserve the concise JD-facing label produced by the comparison
+        # model. The catalog is internal normalization metadata, not a UI
+        # rewrite layer (for example, SQL must remain SQL).
         setattr(d, "facet", dom.facet)
 
         # 2. Adjudicate Evidence (Deterministic)
@@ -324,30 +325,6 @@ def adjudicate_domains(
                 # Store reason in metadata (span_meta or new field if we had one)
                 # For now appending to span_meta text or logging
                 d.span_meta["downgrade_reason"] = ", ".join(reasons)
-            else:
-                ev_level = getattr(d, "evidence_level", "none")
-                level_rank = {"exact": 3, "anchored": 2, "weak": 1, "none": 0}.get(ev_level, 0)
-                type_rank = 1 if dom.domain_type == "hard" else 0
-                must_entries.append((level_rank, (type_rank, 0), d))
-
         out.append(d)
-
-    # 4. MUST cap (Catalog-level)
-    if isinstance(catalog.max_must_count, int) and catalog.max_must_count >= 0 and must_entries:
-        max_keep = catalog.max_must_count
-        if max_keep == 0:
-            max_keep = 0
-        must_entries_sorted = sorted(
-            must_entries,
-            key=lambda x: (x[0], x[1][0]),
-            reverse=True,
-        )
-        keep_set = {id(x[2]) for x in must_entries_sorted[:max_keep]}
-        for _rank, _meta, d in must_entries_sorted[max_keep:]:
-            try:
-                setattr(d, "importance", "should")
-                d.span_meta["downgrade_reason"] = "max_must_count"
-            except Exception:
-                pass
 
     return out

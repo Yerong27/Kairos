@@ -54,15 +54,16 @@ from backend.ir.schema_v3 import (
     SeniorityLabel,
     DomainFacet,
     ExtractedOwnership,
+    ApplicationRecommendation,
 )
 from backend.ir.candidate_profile import CandidateProfile
 from backend.ir.domain_catalog import load_domain_catalogs, adjudicate_domains
-from backend.ir.canonicalize import canon_domain, canon_tool
+from backend.ir.canonicalize import canon_tool
 
 # =============================
 # Gemini setup
 # =============================
-_DEFAULT_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip()
+JOB_ANALYSIS_MODEL = (os.getenv("GEMINI_JOB_MODEL") or "gemini-2.5-flash").strip()
 CATALOG_DIR = pathlib.Path(__file__).parent.parent / "config" / "catalogs"
 _DOMAIN_CATALOG = None
 
@@ -908,9 +909,10 @@ def _extract_with_gemini_v3(
     *,
     title: Optional[str],
     output_language: str,
+    candidate_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     _ensure_gemini_configured()
-    model = genai.GenerativeModel(_DEFAULT_MODEL)
+    model = genai.GenerativeModel(JOB_ANALYSIS_MODEL)
 
     # Pre-load catalog for prompt context
     job_family = _detect_job_family(page_text)
@@ -920,20 +922,46 @@ def _extract_with_gemini_v3(
          for d in catalog.domains.values()],
         indent=2
     )
+    try:
+        prompt_profile = CandidateProfile.model_validate(candidate_profile or {})
+    except Exception as exc:
+        raise ValueError(f"Invalid Candidate Profile: {exc}") from exc
+    candidate_profile_summary = {
+        "evidence_claims": [
+            {
+                "evidence_id": claim.evidence_id,
+                "resume_quote": claim.resume_quote[:500],
+                "skills": list(claim.skills or [])[:12],
+                "domains": list(claim.domains or [])[:8],
+                "role": claim.role,
+            }
+            for claim in prompt_profile.evidence_claims[:40]
+            if claim.evidence_id and claim.resume_quote
+        ],
+        "roles": [
+            {
+                "title": role.title,
+                "organization": role.organization,
+                "date_range": role.date_range,
+            }
+            for role in prompt_profile.roles[:20]
+        ],
+    }
+    candidate_profile_json = json.dumps(candidate_profile_summary, ensure_ascii=False)
 
     prompt = f"""You are a Job Analysis Engine.
 
-Your task: extract a *scorable* IR for ANY professional job.
+Your task: decide whether this candidate should apply and return a compact,
+scorable comparison for ANY professional job.
 
 GLOBAL RULES:
 
-1) ATOMIC REQUIREMENTS:
-   - Extract every independently matchable requirement across ANY profession.
-   - One item must represent one capability, credential, education condition,
-     experience condition, work condition, responsibility, or explicitly
-     required named tool/system.
-   - Do not merge distinct requirements into a broad umbrella merely because
-     they belong to the same industry.
+1) DECISION-LEVEL REQUIREMENTS:
+   - Extract the complete set of hiring-relevant requirements, but group terms
+     that would be assessed together by a recruiter.
+   - Do not turn every noun, example, acronym, or tool into a separate
+     requirement. Most JDs should produce roughly 8-20 decision-level items.
+   - Combine equivalent or overlapping items from the same clause.
    - Do not invent a requirement that lacks a verbatim evidence_quote.
 
 2) IMPORTANCE HIERARCHY:
@@ -943,24 +971,48 @@ GLOBAL RULES:
    - Do not promote a responsibility to MUST merely because it sounds senior.
 
 3) LOGICAL RULES:
-   - Put literal OR choices in `alternatives`; they satisfy one requirement.
+   - One OR list is ONE requirement. Put its choices in `alternatives`.
+     Never emit reversed duplicate requirements for each choice.
    - Terms introduced by "such as", "including", "e.g.", or "for example"
      belong in `examples[]` and are not independent requirements.
    - A named tool/system is its own requirement only when the JD explicitly
      requires proficiency, certification, or experience with that exact item.
 
-4) COUNT & COVERAGE:
-   - Prefer complete coverage over a target count; most JDs contain 6–20 items.
+4) SEMANTIC CANDIDATE MATCH:
+   - Judge professional transferability, not literal phrase overlap.
+   - `matched`: direct evidence or clearly equivalent experience satisfies the
+     hiring requirement.
+   - `partial`: adjacent/transferable evidence exists, but scope, depth, domain,
+     or exact tool differs.
+   - `missing`: the Candidate Profile contains no relevant evidence.
+   - Every matched/partial item MUST cite one or more valid resume_evidence_ids.
+   - Do not use broad labels alone. Read the cited resume quotes in context.
+   - Never treat the same broad label across unrelated professional contexts
+     as equivalent; regulated or compliance evidence must concern the same
+     professional/regulatory domain.
+
+5) SHOULD APPLY:
+   - Make the same holistic recommendation a strong career adviser would make.
+   - Recommend Yes or Maybe when the candidate has strong transferable core
+     experience and the gaps are learnable tools or narrower scope.
+   - Recommend No only for a genuine non-negotiable gate or when the core job
+     function is substantially unsupported.
+   - A missing resume phrase does not prove the candidate cannot do something.
+   - Responsibilities are not hard blockers merely because they appear in the
+     job description.
+
+6) COUNT & COVERAGE:
+   - Prefer complete decision coverage over a fixed output count.
    - Include non-technical constraints such as licences, education, work rights,
      travel, schedule, language, physical conditions, or regulated experience.
    - Keep evidence_summary to at most 20 words and evidence_quote to the shortest
      verbatim clause that proves the requirement.
 
-5) EVIDENCE:
+7) EVIDENCE:
    - **evidence_summary**: Summarize the requirement context (1 sentence) for human understanding.
    - **evidence_quote**: Verbatim quote from the text.
 
-6) SENIORITY RUBRIC (Apply Universally):
+8) SENIORITY RUBRIC (Apply Universally):
    Use these BEHAVIORAL markers to determine `job_seniority_signal`, regardless of tech stack:
    - **MID-LEVEL**: Focus on **Execution** & **Implementation**.
      Keywords: "Implement", "Support", "Maintain", "Collaborate". Scope: Tasks / Features.
@@ -970,7 +1022,7 @@ GLOBAL RULES:
      Keywords: "Set direction", "Mentor", "Cross-functional alignment", "Drive standards", "Stakeholder management". Scope: Team / Organization.
    - **NOTE**: Many JDs don't put "Lead" in the title but describe Lead-level influence. Trust the **responsibilities** over the title.
 
-7) OWNERSHIP & SCOPE (Critical for Precision):
+9) OWNERSHIP & SCOPE (Critical for Precision):
    Extract these signals explicitly (Integer Levels 0-3):
    - **ownership.level_val**: 0=None, 1=Task Owner (Can do work), 2=Result Owner (Accountable), 3=System/End-to-End Owner.
    - **scope.level_val**: 0=Unknown, 1=Self only, 2=Team Impact, 3=Multi-Team/Org Impact.
@@ -979,6 +1031,10 @@ GLOBAL RULES:
 <job_text>
 {page_text[:25000]}
 </job_text>
+
+<candidate_profile>
+{candidate_profile_json}
+</candidate_profile>
 
 OUTPUT FORMAT (JSON ONLY):
 Produce a single valid JSON object following this structure. Do NOT wrap in markdown code blocks.
@@ -994,6 +1050,9 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
       "requirement_type": "capability|tool|credential|education|experience|work_condition|responsibility|other",
       "importance": "must|should|nice_to_have",
       "alternatives": ["literal OR alternative"],
+      "match_status": "matched|partial|missing",
+      "resume_evidence_ids": ["exact evidence_id from candidate_profile"],
+      "match_reason": "one concise candidate-specific reason",
       "evidence_summary": "string",
       "evidence_quote": "string",
       "examples": [
@@ -1009,6 +1068,14 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
     "ownership": {{ "present": true, "level_val": 0, "evidence": ["string"] }},
     "scope": {{ "level_val": 0, "evidence": ["string"] }},
     "leadership": {{ "present": true, "level_val": 0, "evidence": ["string"] }}
+  }},
+  "application_recommendation": {{
+    "should_apply": "Yes|Maybe|No",
+    "confidence": "low|medium|high",
+    "rationale": "concise holistic explanation",
+    "hard_blockers": ["only genuine non-negotiable missing gates"],
+    "strongest_matches": ["string"],
+    "key_gaps": ["string"]
   }},
   "evidence_hints": {{
     "years_experience": "string",
@@ -1046,6 +1113,31 @@ OUTPUT LANGUAGE: {output_language}
         )
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
+        valid_candidate_ids = {
+            item["evidence_id"]
+            for item in candidate_profile_summary["evidence_claims"]
+            if item.get("evidence_id")
+        }
+        if valid_candidate_ids and parsed_ir.domain_requirements:
+            invalid_semantic_items = []
+            for requirement in parsed_ir.domain_requirements:
+                status = str(requirement.match_status or "unknown")
+                cited = {
+                    value
+                    for value in (requirement.resume_evidence_ids or [])
+                    if value in valid_candidate_ids
+                }
+                if status == "unknown" or (
+                    status in {"matched", "partial"} and not cited
+                ):
+                    invalid_semantic_items.append(requirement.name)
+            if invalid_semantic_items:
+                raise ValueError(
+                    "Gemini omitted valid candidate evidence for requirement comparison: "
+                    + ", ".join(invalid_semantic_items[:5])
+                )
+            if not parsed_ir.application_recommendation.rationale.strip():
+                raise ValueError("Gemini omitted the application recommendation rationale")
 
         # Attach raw JSON for debugging/transparency
         try:
@@ -1323,18 +1415,15 @@ def _derive_domain_importance_from_context(
         # If it's clearly example framing and lacks strict markers, keep SHOULD.
         if ctx_has_example and not ctx_has_strict:
             return "should"
-        # In requirements section, defaulting to MUST is acceptable for domains;
-        # tools will still be constrained separately.
-        return "must"
+        # The comparison model sees the full section structure. Do not promote
+        # an item it classified as SHOULD merely because a noisy extracted
+        # context window resembles a requirements section.
+        return "must" if base == "must" else "should"
 
     # If LLM said must but we don't see requirement section nor strict language => do NOT allow must
     if base == "must":
         if not ctx_has_strict:
             return "should"
-        return "must"
-
-    # Context strict markers (outside responsibilities) can promote to MUST if not example/preference
-    if ctx_has_strict and not ctx_has_example and not bool(RE_PREFERENCE.search(ctx)):
         return "must"
 
     if RE_PREFER_SHOULD_DOMAINS.search(name_l) or RE_PREFER_SHOULD_DOMAINS.search(q):
@@ -2029,6 +2118,7 @@ def analyze_v3(
         page_text=page_text_orig,
         title=title,
         output_language=output_language,
+        candidate_profile=candidate_profile,
     )
 
     job = raw.get("job") or {}
@@ -2089,6 +2179,11 @@ def analyze_v3(
     except Exception as exc:
         raise ValueError(f"Invalid Candidate Profile: {exc}") from exc
     candidate_skills = [canon_tool(s) or s for s in profile.candidate_skills]
+    candidate_evidence_by_id = {
+        claim.evidence_id: claim
+        for claim in profile.evidence_claims
+        if claim.evidence_id and claim.resume_quote
+    }
     candidate_seniority_signal = profile.candidate_seniority_signal or "unknown"
     candidate_seniority_normalized = candidate_seniority_signal
     candidate_seniority_numeric = _level_num(candidate_seniority_signal)
@@ -2124,15 +2219,12 @@ def analyze_v3(
 
     domain_requirements: List[DomainRequirement] = []
     raw_domains = _safe_list(job.get("domain_requirements") or raw.get("domain_requirements"))
-    if len(raw_domains) > 22:
-        raw_domains = raw_domains[:22]
 
     for d in raw_domains:
         if not isinstance(d, dict):
             continue
 
         name = _normalize_whitespace(str(d.get("name") or ""))
-        name = canon_domain(name)
         if not name or len(name) > 80:
             continue
 
@@ -2169,7 +2261,7 @@ def analyze_v3(
             facet=facet,
             section_kind=section_kind,
         )
-        if imp not in ("must", "should", "nice", "unknown"):
+        if imp not in ("must", "should", "nice", "nice_to_have", "unknown"):
             imp = "should"
         if imp == "unknown":
             imp = "should"
@@ -2196,6 +2288,20 @@ def analyze_v3(
             ):
                 alternatives.append(alternative)
         alternatives = _dedupe_keep_order(alternatives)[:10]
+        match_status = _normalize_whitespace(str(d.get("match_status") or "unknown")).lower()
+        if match_status not in {"matched", "partial", "missing", "unknown"}:
+            match_status = "unknown"
+        resume_evidence_ids = [
+            str(value).strip()
+            for value in _safe_list(d.get("resume_evidence_ids"))
+            if str(value).strip() in candidate_evidence_by_id
+        ]
+        resume_evidence_ids = _dedupe_keep_order(resume_evidence_ids)[:5]
+        if match_status in {"matched", "partial"} and not resume_evidence_ids:
+            match_status = "unknown"
+        if match_status in {"missing", "unknown"}:
+            resume_evidence_ids = []
+        match_reason = _normalize_whitespace(str(d.get("match_reason") or ""))[:500] or None
 
         examples: List[ToolEvidence] = []
         raw_examples = _safe_list(d.get("examples"))
@@ -2283,6 +2389,9 @@ def analyze_v3(
                 importance=imp,
                 requirement_type=requirement_type,
                 alternatives=alternatives,
+                match_status=match_status,
+                resume_evidence_ids=resume_evidence_ids,
+                match_reason=match_reason,
                 evidence_quote=evidence_quote,
                 facet=facet,
                 anchors=anchors,
@@ -2295,7 +2404,42 @@ def analyze_v3(
             )
         )
 
-    # dedupe domains by name, merge best evidence/examples/anchors
+    # Collapse reversed duplicates of the same literal OR choice group. For
+    # example, "CDK alternatives=[CloudFormation]" and the reversed item are
+    # one hiring requirement, not two independent matches.
+    choice_groups: Dict[Tuple[str, ...], DomainRequirement] = {}
+    collapsed_requirements: List[DomainRequirement] = []
+    match_rank = {"unknown": 0, "missing": 1, "partial": 2, "matched": 3}
+    for dr in domain_requirements:
+        choice_labels = _dedupe_keep_order([dr.name] + list(dr.alternatives or []))
+        choice_key = tuple(sorted(_normalize_whitespace(x).lower() for x in choice_labels if x))
+        if len(choice_key) < 2:
+            collapsed_requirements.append(dr)
+            continue
+        existing_choice = choice_groups.get(choice_key)
+        if existing_choice is None:
+            choice_groups[choice_key] = dr
+            collapsed_requirements.append(dr)
+            continue
+        display_choices = _dedupe_keep_order(
+            [existing_choice.name]
+            + list(existing_choice.alternatives or [])
+            + [dr.name]
+            + list(dr.alternatives or [])
+        )
+        existing_choice.name = " / ".join(display_choices)
+        existing_choice.alternatives = display_choices
+        existing_choice.resume_evidence_ids = _dedupe_keep_order(
+            list(existing_choice.resume_evidence_ids or []) + list(dr.resume_evidence_ids or [])
+        )[:5]
+        if match_rank.get(dr.match_status, 0) > match_rank.get(existing_choice.match_status, 0):
+            existing_choice.match_status = dr.match_status
+            existing_choice.match_reason = dr.match_reason
+        if _IMPORTANCE_RANK.get(dr.importance, 0) > _IMPORTANCE_RANK.get(existing_choice.importance, 0):
+            existing_choice.importance = dr.importance
+    domain_requirements = collapsed_requirements
+
+    # Dedupe exact normalized names and merge supporting metadata.
     dom_map: Dict[str, DomainRequirement] = {}
     facet_rank = {"people": 3, "technical": 2, "process": 1, "unknown": 0}
 
@@ -2330,6 +2474,12 @@ def analyze_v3(
         # Phase 3: Merge domain_id if present in new item but missing in existing
         if not exist.domain_id and dr.domain_id:
             exist.domain_id = dr.domain_id
+        exist.resume_evidence_ids = _dedupe_keep_order(
+            list(exist.resume_evidence_ids or []) + list(dr.resume_evidence_ids or [])
+        )[:5]
+        if match_rank.get(dr.match_status, 0) > match_rank.get(exist.match_status, 0):
+            exist.match_status = dr.match_status
+            exist.match_reason = dr.match_reason
 
         dom_map[k] = exist
 
@@ -2350,9 +2500,6 @@ def analyze_v3(
             x.name.lower(),
         )
     )
-    if len(domain_requirements) > 14:
-        domain_requirements = domain_requirements[:14]
-
     evidence_hints = job.get("evidence_hints") or raw.get("evidence_hints") or {}
     if not isinstance(evidence_hints, dict):
         evidence_hints = {}
@@ -2362,6 +2509,15 @@ def analyze_v3(
         ownership_and_scope = ExtractedOwnership.model_validate(ownership_raw)
     except Exception:
         ownership_and_scope = ExtractedOwnership()
+    recommendation_raw = (
+        job.get("application_recommendation")
+        or raw.get("application_recommendation")
+        or {}
+    )
+    try:
+        application_recommendation = ApplicationRecommendation.model_validate(recommendation_raw)
+    except Exception:
+        application_recommendation = ApplicationRecommendation()
 
     try:
         raw.setdefault("_debug_meta", {})
@@ -2402,11 +2558,12 @@ def analyze_v3(
         domain_requirements=domain_requirements,
         tools_in_jd=jd_tools,
         ownership_and_scope=ownership_and_scope,
+        application_recommendation=application_recommendation,
         evidence_hints=evidence_hints,
         raw_llm_json=raw,
         analysis_status="success" if domain_requirements else "degraded",
-        model_used=_DEFAULT_MODEL,
+        model_used=JOB_ANALYSIS_MODEL,
     )
 
 
-__all__ = ["analyze_v3"]
+__all__ = ["JOB_ANALYSIS_MODEL", "analyze_v3"]

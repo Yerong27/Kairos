@@ -52,7 +52,7 @@ http://localhost:8000/notion/callback
 
 ```dotenv
 GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_JOB_MODEL=gemini-2.5-flash
 GEMINI_RESUME_MODEL=gemini-2.5-flash-lite
 
 NOTION_CLIENT_ID=your_notion_client_id
@@ -178,7 +178,7 @@ Copy its Client ID and Client Secret.
 
 ```dotenv
 GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_JOB_MODEL=gemini-2.5-flash
 GEMINI_RESUME_MODEL=gemini-2.5-flash-lite
 
 NOTION_CLIENT_ID=your_notion_client_id

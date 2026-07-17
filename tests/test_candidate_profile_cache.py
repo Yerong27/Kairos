@@ -22,6 +22,7 @@ def _profile(skill: str = "Python") -> CandidateProfile:
         candidate_seniority_signal="junior_to_mid",
         evidence_claims=[
             CandidateEvidenceClaim(
+                evidence_id="ev_profile",
                 resume_quote=f"Built production services with {skill}.",
                 skills=[skill],
                 domains=["API Development"],
@@ -285,7 +286,7 @@ def test_existing_database_is_migrated_without_losing_resume():
             assert "candidate_profiles" in tables
 
 
-def test_jd_gemini_prompt_does_not_contain_candidate_profile():
+def test_jd_gemini_prompt_uses_compact_cached_profile_not_raw_resume():
     captured = {}
 
     class FakeModel:
@@ -308,10 +309,13 @@ def test_jd_gemini_prompt_does_not_contain_candidate_profile():
             "Requirements: build APIs and reliable services.",
             title="Engineer",
             output_language="en",
+            candidate_profile=_profile("Python").model_dump(),
         )
 
-    assert "<candidate_profile>" not in captured["prompt"]
-    assert "candidate_skills" not in captured["prompt"]
+    assert "<candidate_profile>" in captured["prompt"]
+    assert "Built production services with Python." in captured["prompt"]
+    assert "raw_llm_json" not in captured["prompt"]
+    assert "PRIVATE FULL RESUME" not in captured["prompt"]
 
 
 def test_job_analysis_uses_stored_profile_without_sending_raw_resume_to_jd_parser():

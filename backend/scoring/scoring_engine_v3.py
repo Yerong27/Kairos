@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
 from backend.ir.schema_v3 import AnalyzeIRv3, DomainRequirement, ToolEvidence, SeniorityLabel
 from backend.ir.candidate_profile import CandidateEvidenceClaim
-from backend.ir.canonicalize import canon_domain, canon_tool
+from backend.ir.canonicalize import canon_tool
 from backend.scoring.evidence_matcher import EvidenceMatchDecision, match_requirement_to_evidence
 
 ShouldApply = Literal["Yes", "Maybe", "No"]
@@ -722,24 +722,10 @@ def _tokenize(s: str) -> List[str]:
 
 def _canonical_domain_key(name: str, domain_id: Optional[str] = None) -> str:
     """
-    Canonicalize domain names to merge obvious duplicates (e.g., CI/CD Integration vs Pipelines).
-    Keeps this small to stay domain-agnostic and avoid overfitting.
+    Use the model's decision-level label as the identity. Catalog IDs are broad
+    normalization metadata and must not collapse distinct JD requirements.
     """
-    # `other_info` is a bucket, not an identity. Using it as the canonical key
-    # previously collapsed every uncatalogued JD requirement into one item.
-    if domain_id and _canon_token(domain_id) != "other info":
-        did = _canon_token(domain_id)
-        if did:
-            return did
-    n = _canon_token(canon_domain(name))
-    if not n:
-        return ""
-
-    n_low = n.lower()
-    if any(k in n_low for k in ["ci/cd", "ci cd", "cicd", "continuous integration", "continuous delivery", "continuous deployment"]):
-        return "ci_cd"
-
-    return n_low
+    return _canon_token(name).lower()
 
 
 def _dedupe_domains_by_canon(domains: List[DomainRequirement]) -> List[DomainRequirement]:
@@ -753,12 +739,7 @@ def _dedupe_domains_by_canon(domains: List[DomainRequirement]) -> List[DomainReq
     seen: Dict[str, int] = {}
 
     for d in domains or []:
-        d_name = canon_domain(getattr(d, "name", "") or "")
-        if d_name:
-            try:
-                setattr(d, "name", d_name)
-            except Exception:
-                pass
+        d_name = str(getattr(d, "name", "") or "").strip()
         key = _canonical_domain_key(d_name, getattr(d, "domain_id", None))
         if not key or key not in seen:
             seen[key] = len(out)
@@ -2108,6 +2089,11 @@ def score_ir_v3(
 
     base_skills = _get_candidate_skills(job_ir, candidate_skills)
     structured_claims = _get_candidate_evidence_claims(job_ir)
+    claims_by_evidence_id = {
+        claim.evidence_id: claim
+        for claim in structured_claims
+        if str(claim.evidence_id or "").strip()
+    }
 
     extracted_claims: List[str] = []
     if isinstance(candidate_text, str) and candidate_text.strip():
@@ -2150,6 +2136,12 @@ def score_ir_v3(
         and getattr(d, "domain_id", "") != "other_info"
     ]
     domains, must_downgraded = _downgrade_must_if_not_allowed(domains_raw)
+    semantic_match_available = any(
+        str(getattr(domain, "match_status", "unknown") or "unknown")
+        in {"matched", "partial", "missing"}
+        for domain in domains
+    )
+    semantic_invalid_requirements = 0
 
     job_level: SeniorityLabel = _get_job_level(job_ir)
     cand_title_signal = _get_candidate_title_signal(job_ir)
@@ -2316,7 +2308,41 @@ def score_ir_v3(
         anchors_used[d_name or "unknown"] = anchors[:60]
 
         evidence_decision: Optional[EvidenceMatchDecision] = None
-        if structured_claims:
+        semantic_status = str(getattr(d, "match_status", "unknown") or "unknown")
+        if semantic_match_available:
+            evidence_ids = [
+                str(value).strip()
+                for value in (getattr(d, "resume_evidence_ids", None) or [])
+                if str(value).strip() in claims_by_evidence_id
+            ]
+            if semantic_status in {"matched", "partial"} and not evidence_ids:
+                semantic_invalid_requirements += 1
+                semantic_status = "missing"
+            elif semantic_status not in {"matched", "partial", "missing"}:
+                semantic_invalid_requirements += 1
+                semantic_status = "missing"
+            selected_claims = [claims_by_evidence_id[value] for value in evidence_ids]
+            evidence_decision = EvidenceMatchDecision(
+                status=cast(Any, semantic_status),
+                confidence={"matched": 0.92, "partial": 0.62, "missing": 0.0}[semantic_status],
+                evidence_ids=evidence_ids,
+                evidence_quotes=[claim.resume_quote[:280] for claim in selected_claims],
+                reason=(
+                    "semantic_model:"
+                    + str(getattr(d, "match_reason", "") or "candidate_profile_comparison")[:400]
+                ),
+            )
+            dom_conf = float(evidence_decision.confidence)
+            _dom_status = {
+                "matched": "hit",
+                "partial": "soft_hit",
+                "missing": "missing",
+            }[evidence_decision.status]
+            dom_exact = evidence_decision.status == "matched"
+            domain_resume_evidence[d_name] = list(evidence_decision.evidence_quotes)
+            domain_evidence_ids[d_name] = list(evidence_decision.evidence_ids)
+            domain_match_reasons[d_name] = evidence_decision.reason
+        elif structured_claims:
             evidence_decision = match_requirement_to_evidence(d, structured_claims)
             dom_conf = float(evidence_decision.confidence)
             _dom_status = {
@@ -2564,6 +2590,14 @@ def score_ir_v3(
     )
 
     stuffing_penalty, stuffing_bucket = _keyword_stuffing_penalty(cand_keyword_ratio)
+    if semantic_match_available:
+        # Semantic statuses already encode direct, transferable, and missing
+        # evidence. Applying the old lexical coverage penalty again would
+        # double-count the same gaps.
+        penalty = 1.0
+        penalty_bucket = "semantic_statuses_direct"
+        stuffing_penalty = 1.0
+        stuffing_bucket = "semantic_profile"
     penalty2 = penalty * stuffing_penalty
     penalty2 = max(0.0, min(1.0, penalty2))
     penalty_bucket2 = f"{penalty_bucket}+{stuffing_bucket}"
@@ -2659,6 +2693,20 @@ def score_ir_v3(
         risk_level=risk_level,
         job_level=job_level,
     )
+    model_recommendation = _get_field(job_ir, "application_recommendation", None)
+    model_should_apply = str(_get_field(model_recommendation, "should_apply", "") or "")
+    model_rationale = str(_get_field(model_recommendation, "rationale", "") or "").strip()
+    semantic_recommendation_valid = bool(
+        model_should_apply in {"Yes", "Maybe", "No"} and model_rationale
+    )
+    if semantic_match_available and semantic_recommendation_valid:
+        should_apply = cast(ShouldApply, model_should_apply)
+        if should_apply == "Yes":
+            final_score = max(70, min(92, int(final_score)))
+        elif should_apply == "Maybe":
+            final_score = max(45, min(69, int(final_score)))
+        else:
+            final_score = min(44, int(final_score))
 
     risk_text = "" if risk_level in ("none", "low") else f" Risk: {risk_level} (missing {len(must_missing_names)} must)."
     extra_seniority_text = " (overqualified)" if bucket == "overqualified" else ""
@@ -2757,6 +2805,8 @@ def score_ir_v3(
         )
         if structured_claims
         else 0
+    ) + semantic_invalid_requirements + int(
+        semantic_match_available and not semantic_recommendation_valid
     )
     tool_matrix = [
         {
@@ -2793,7 +2843,17 @@ def score_ir_v3(
             "blocked_by_seniority": (bucket == "cliff"),
             "signal_insufficient": signal_insufficient,
             "matcher_mode": (
-                "evidence_grounded_v2" if structured_claims else "legacy_flat_text"
+                "semantic_profile_comparison"
+                if semantic_match_available
+                else ("evidence_grounded_v2" if structured_claims else "legacy_flat_text")
+            ),
+            "semantic_invalid_requirements": semantic_invalid_requirements,
+            "application_recommendation": (
+                model_recommendation.model_dump()
+                if hasattr(model_recommendation, "model_dump")
+                else model_recommendation
+                if isinstance(model_recommendation, dict)
+                else {}
             ),
             "candidate_evidence_claim_count": len(structured_claims),
             "unsupported_requirement_matches": unsupported_requirement_matches,
@@ -3036,7 +3096,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
     per_tool_should = (result.debug_breakdown.per_tool_should or {}) if result.debug_breakdown else {}
 
     domain_strengths = _sort_ci(
-        _dedupe_keep_order([canon_domain(k) or k for k, v in per_domain.items() if v in ("hit", "soft_hit")])
+        _dedupe_keep_order([k for k, v in per_domain.items() if v in ("hit", "soft_hit")])
     )
     tool_strengths = _sort_ci(
         _dedupe_keep_order([canon_tool(k) or k for k, v in per_tool_should.items() if v in ("hit", "soft_hit")])
@@ -3076,8 +3136,20 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
     requirement_counts = constraints.get("requirement_counts", {}) if isinstance(constraints, dict) else {}
     tool_matrix = constraints.get("tool_matrix", []) if isinstance(constraints, dict) else []
     tool_counts = constraints.get("tool_counts", {}) if isinstance(constraints, dict) else {}
+    model_recommendation = (
+        constraints.get("application_recommendation", {})
+        if isinstance(constraints, dict)
+        else {}
+    )
 
-    if signal_insufficient:
+    if (
+        isinstance(model_recommendation, dict)
+        and str(model_recommendation.get("rationale") or "").strip()
+        and constraints.get("matcher_mode") == "semantic_profile_comparison"
+    ):
+        decision_reason = "semantic_candidate_assessment"
+        decision_explanation = str(model_recommendation.get("rationale") or "").strip()
+    elif signal_insufficient:
         decision_reason = "insufficient_signal"
         decision_explanation = "Insufficient domain requirements to score reliably."
     elif seniority_bucket == "cliff":
@@ -3326,6 +3398,12 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
     }
 
     score_summary = result.summary
+    if (
+        isinstance(model_recommendation, dict)
+        and constraints.get("matcher_mode") == "semantic_profile_comparison"
+        and str(model_recommendation.get("rationale") or "").strip()
+    ):
+        score_summary = str(model_recommendation.get("rationale") or "").strip()
     if seniority_bucket == "cliff":
         score_summary = f"{result.summary} (Capped primarily by seniority.)"
 
@@ -3354,7 +3432,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "2.0"},
+        "contract": {"name": "kairos_v3_public", "version": "2.1"},
         "decision": decision,
         "score": score,
         "analysis_quality": {
@@ -3380,9 +3458,9 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
             "counts": requirement_counts if isinstance(requirement_counts, dict) else {},
             "items": requirement_matrix if isinstance(requirement_matrix, list) else [],
             "status_meaning": {
-                "matched": "Resume evidence passed the deterministic matching threshold.",
-                "partial": "Related evidence exists, but it is not strong or specific enough.",
-                "missing": "No supporting resume evidence was found.",
+                "matched": "The cited resume evidence directly or equivalently satisfies the requirement.",
+                "partial": "The cited evidence is transferable or adjacent, but scope, depth, or exact tooling differs.",
+                "missing": "The stored Candidate Profile contains no relevant resume evidence.",
                 "unverified": "The JD requirement could not be verified reliably.",
             },
         },

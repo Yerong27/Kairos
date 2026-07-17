@@ -27,6 +27,7 @@ SeniorityLabel = Literal["intern", "junior", "mid", "senior", "lead", "principal
 # lightweight domain facet for explainability / safer importance rules
 DomainFacet = Literal["technical", "process", "people", "unknown"]
 SupportLevel = Literal["strong", "weak", "none"]
+MatchStatus = Literal["matched", "partial", "missing", "unknown"]
 RequirementType = Literal[
     "capability",
     "tool",
@@ -74,6 +75,9 @@ class DomainRequirement(BaseModel):
         default_factory=list,
         description="Literal OR alternatives that can satisfy the same requirement",
     )
+    match_status: MatchStatus = "unknown"
+    resume_evidence_ids: List[str] = Field(default_factory=list)
+    match_reason: Optional[str] = None
 
     # Phase 3: Canonical ID & Evidence Protocol
     domain_id: Optional[str] = Field(default=None, description="Canonical Domain ID from Catalog")
@@ -123,6 +127,15 @@ class ExtractedOwnership(BaseModel):
     leadership: LeadershipSignal = Field(default_factory=LeadershipSignal)
 
 
+class ApplicationRecommendation(BaseModel):
+    should_apply: Literal["Yes", "Maybe", "No"] = "Maybe"
+    confidence: Literal["low", "medium", "high"] = "low"
+    rationale: str = ""
+    hard_blockers: List[str] = Field(default_factory=list)
+    strongest_matches: List[str] = Field(default_factory=list)
+    key_gaps: List[str] = Field(default_factory=list)
+
+
 # -----------------------------
 # Top-level IR
 # -----------------------------
@@ -148,6 +161,9 @@ class AnalyzeIRv3(BaseModel):
 
     # New Phase 2 Field
     ownership_and_scope: ExtractedOwnership = Field(default_factory=ExtractedOwnership)
+    application_recommendation: ApplicationRecommendation = Field(
+        default_factory=ApplicationRecommendation
+    )
 
     evidence_hints: Dict[str, Optional[str]] = Field(default_factory=dict)
 
@@ -170,6 +186,7 @@ __all__ = [
     "SeniorityLabel",
     "DomainFacet",
     "RequirementType",
+    "MatchStatus",
     "EvidenceLevel",
     "ToolEvidence",
     "DomainRequirement",
@@ -177,5 +194,6 @@ __all__ = [
     "ExtractedOwnership",
     "OwnershipScope",
     "ScopeLevel",
-    "LeadershipSignal"
+    "LeadershipSignal",
+    "ApplicationRecommendation",
 ]

@@ -34,7 +34,10 @@ load_dotenv(BASE_DIR / ".env")
 # v3 (new)
 _V3_AVAILABLE = True
 try:
-    from backend.llm.analyze_v3 import analyze_v3 as kairos_analyze_v3
+    from backend.llm.analyze_v3 import (
+        JOB_ANALYSIS_MODEL,
+        analyze_v3 as kairos_analyze_v3,
+    )
     from backend.llm.analyze_resume import (
         CANDIDATE_PROFILE_MODEL,
         CANDIDATE_PROFILE_PROMPT_VERSION,
@@ -50,6 +53,7 @@ except Exception:
     kairos_analyze_resume = None  # type: ignore
     candidate_profile_evidence_text = None  # type: ignore
     CandidateProfile = None  # type: ignore
+    JOB_ANALYSIS_MODEL = "unknown"
     CANDIDATE_PROFILE_MODEL = "unknown"
     CANDIDATE_PROFILE_PROMPT_VERSION = "unknown"
     CANDIDATE_PROFILE_SCHEMA_VERSION = "unknown"
@@ -1101,12 +1105,13 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 ) from exc
 
             cache_key = _sha256_text(
-                "kairos_v3_public:2.0",
+                "kairos_v3_public:2.1",
                 _canonical_jd_for_cache(req.page_text or ""),
                 resume_hash,
                 CANDIDATE_PROFILE_MODEL,
                 CANDIDATE_PROFILE_SCHEMA_VERSION,
                 CANDIDATE_PROFILE_PROMPT_VERSION,
+                JOB_ANALYSIS_MODEL,
                 req.title or "",
                 req.output_language or "en",
             )
@@ -1307,6 +1312,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                         "resume_chars": len(resume_text or ""),
                         "resume_hash_prefix": resume_hash[:12],
                         "candidate_profile_model": CANDIDATE_PROFILE_MODEL,
+                        "job_analysis_model": JOB_ANALYSIS_MODEL,
                         "candidate_profile_schema_version": CANDIDATE_PROFILE_SCHEMA_VERSION,
                         "extraction": req.extraction_meta or {},
                     },
