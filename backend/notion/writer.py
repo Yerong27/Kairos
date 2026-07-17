@@ -443,32 +443,20 @@ def _render_missing_to_notion(public_contract: Dict[str, Any]) -> List[dict]:
             )
 
     if rec_items:
-        toggle_children: List[dict] = []
+        blocks.append(_notion_heading("⚠️ Gaps (recommended)", level=2))
         for it in rec_items[:20]:
-            toggle_children.append(
+            blocks.append(
                 {
                     "object": "block",
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {"rich_text": _notion_rich_text(it)},
                 }
             )
-
         notes = []
         if isinstance(missing_obj, dict):
             notes = [_safe_str(x).strip() for x in _as_list(missing_obj.get("notes", [])) if _safe_str(x).strip()]
         if notes:
-            toggle_children.append(_notion_paragraph(_clamp_text(" ".join(notes), 400)))
-
-        blocks.append(
-            {
-                "object": "block",
-                "type": "toggle",
-                "toggle": {
-                    "rich_text": _notion_rich_text("💡 Suggestions (optional)"),
-                    "children": toggle_children,
-                },
-            }
-        )
+            blocks.append(_notion_paragraph(_clamp_text(" ".join(notes), 400)))
 
     return blocks
 
@@ -542,7 +530,7 @@ def _render_decision_constraints_to_notion(public_contract: Dict[str, Any], resp
         if jl:
             parts.append(f"Job level: {jl}")
         if cl:
-            parts.append(f"Current level: {cl}")
+            parts.append(f"Your level: {cl}")
         if gl:
             parts.append(f"Gap: {gl}")
         lines.append(" • ".join(parts) + ".")
@@ -811,17 +799,10 @@ def create_notion_page(
         _notion_divider(),
     ]
 
-    requirement_items = (
-        _as_list(_get_in(public_contract, ["requirements", "items"], []))
-        if isinstance(public_contract, dict)
-        else []
-    )
-    if isinstance(public_contract, dict) and requirement_items:
-        blocks.extend(_render_requirement_matrix_to_notion(public_contract, resp))
-
-    # Backward-compatible renderer for old cache entries that predate the
-    # requirement matrix contract.
-    if isinstance(public_contract, dict) and not requirement_items:
+    # Keep the user-facing page focused on the decision, gaps, strengths, and
+    # actions. The requirement evidence matrix remains available internally
+    # for scoring/debugging but is intentionally not rendered into Notion.
+    if isinstance(public_contract, dict):
         display_required = _as_list(public_contract.get("display_required_domains") or [])
         display_evidence = public_contract.get("display_domain_evidence") or {}
         tools_in_jd = _as_list(public_contract.get("tools_in_jd") or [])

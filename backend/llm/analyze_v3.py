@@ -171,6 +171,13 @@ def _normalize_tool_token(tok: str) -> List[str]:
     t = re.sub(r"[()\[\]{}]+", " ", t)
     t = re.sub(r"[;]+", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"^(?:such as|including|for example)\s+", "", t, flags=re.IGNORECASE).strip()
+    if not t or "?" in t:
+        return []
+    if re.match(r"^(?:and|or|but|are you|you will|you are|we are|the role)\b", t, re.IGNORECASE):
+        return []
+    if len(t) > 64 or len(t.split()) > 6:
+        return []
     key = t.lower()
     if key in _JD_TOOL_IGNORE:
         return []
@@ -1706,12 +1713,13 @@ _SENIOR_RESPONSIBILITY_RE = re.compile(
 )
 
 
-def _experience_relevance_score(block_text: str, job_family: str) -> int:
+def _experience_relevance_score(block_text: str, job_family: str, *, title: str = "") -> int:
     if not block_text:
         return 0
     if not job_family or job_family == "general":
         return 1
     low = block_text.lower()
+    title_low = (title or "").lower()
     terms = _EXPERIENCE_FAMILY_TERMS.get(job_family, ())
 
     def contains(term: str) -> bool:
@@ -1725,6 +1733,17 @@ def _experience_relevance_score(block_text: str, job_family: str) -> int:
         finance_markers = ("accountant", "accounting", "financial", "budget", "forecast", "tax", "reconciliation")
         tech_core = ("python", "sql", "etl", "pipeline", "sagemaker", "bedrock", "llm", "rag", "machine learning", "cloud", "aws", "azure", "gcp")
         if any(contains(term) for term in finance_markers) and not any(contains(term) for term in tech_core):
+            return 0
+
+    # A resume section can run into the next section when PDF line breaks are
+    # imperfect.  Treat an explicitly finance/accounting role as non-technical
+    # even when the captured body happens to contain words from a later section.
+    if job_family in ("tech_swe", "tech_data"):
+        finance_title_markers = (
+            "finance", "financial", "accountant", "accounting", "commercial analyst",
+            "budget", "tax", "audit",
+        )
+        if any(marker in title_low for marker in finance_title_markers):
             return 0
 
     return sum(1 for term in terms if contains(term))
@@ -1787,7 +1806,9 @@ def _parse_experience_blocks(text: str, *, job_family: str = "general") -> List[
                     "level_num": _level_num(level) if level else None,
                     "duration_months": duration_months,
                     "months_ago": months_ago,
-                    "relevance_score": _experience_relevance_score(block_text, job_family),
+                    "relevance_score": _experience_relevance_score(
+                        block_text, job_family, title=title_line or ln
+                    ),
                     "mid_signal_count": len(_MID_RESPONSIBILITY_RE.findall(block_text)),
                     "senior_signal_count": len(_SENIOR_RESPONSIBILITY_RE.findall(block_text)),
                 }
@@ -1811,7 +1832,9 @@ def _parse_experience_blocks(text: str, *, job_family: str = "general") -> List[
                     "level_num": _level_num(level) if level else None,
                     "duration_months": duration_months,
                     "months_ago": months_ago,
-                    "relevance_score": _experience_relevance_score(block_text, job_family),
+                    "relevance_score": _experience_relevance_score(
+                        block_text, job_family, title=title_line or ln
+                    ),
                     "mid_signal_count": len(_MID_RESPONSIBILITY_RE.findall(block_text)),
                     "senior_signal_count": len(_SENIOR_RESPONSIBILITY_RE.findall(block_text)),
                 }
@@ -1895,9 +1918,27 @@ def _derive_candidate_level_from_experience(
         )
 
     if has_recent_juniorish and not has_recent_senior:
-        if overall in ("mid", "senior", "lead"):
+        recent_juniorish_entries = [
+            e for e in recent_entries if e.get("level") in ("apprentice", "intern", "junior")
+        ]
+        recent_juniorish_months = max(
+            (int(e.get("duration_months", 0)) for e in recent_juniorish_entries), default=0
+        )
+        recent_mid_signals = sum(
+            int(e.get("mid_signal_count", 0)) for e in recent_juniorish_entries
+        )
+        if overall in ("apprentice", "intern") and (
+            recent_juniorish_months >= 18 or recent_mid_signals >= 2
+        ):
+            # The entry title still matters, but it should not permanently pin
+            # someone to apprentice/intern after sustained hands-on experience.
             overall = "junior"
-        reason = "recent_floor_apprentice"
+            reason = "apprenticeship_progressed_by_experience"
+        elif overall in ("mid", "senior", "lead"):
+            overall = "junior"
+            reason = "recent_junior_title_cap"
+        else:
+            reason = "recent_junior_title"
     elif has_recent_senior:
         if overall in ("intern", "apprentice", "junior"):
             overall = "mid"
@@ -1945,6 +1986,7 @@ def analyze_v3(
     page_text: str,
     title: Optional[str] = None,
     candidate_profile: Optional[Dict[str, Any]] = None,
+    candidate_resume_text: Optional[str] = None,
     output_language: str = "en",
 ) -> AnalyzeIRv3:
     if not (page_text or "").strip():
@@ -2028,6 +2070,33 @@ def analyze_v3(
     candidate_seniority_numeric = _level_num(candidate_seniority_signal)
     candidate_seniority_reason = profile.seniority_reason or "candidate_profile"
     candidate_title_signal = profile.roles[0].title if profile.roles else "unknown"
+
+    # Restore the previous job-family-aware seniority behavior without sending
+    # the resume to the JD Gemini request. A single global career level is
+    # misleading for career changers: finance experience, for example, should
+    # not make someone overqualified for a junior engineering role.
+    candidate_job_family = _detect_job_family(page_text)
+    exp_level, exp_reason, top_entries = _derive_candidate_level_from_experience(
+        (candidate_resume_text or "").strip(), job_family=candidate_job_family
+    )
+    if exp_level:
+        candidate_seniority_normalized = exp_level
+        candidate_seniority_signal = exp_level
+        candidate_seniority_numeric = _level_num(exp_level)
+        candidate_seniority_reason = f"job_family_experience:{exp_reason}"
+        raw.setdefault("_debug_meta", {})
+        raw["_debug_meta"]["candidate_seniority_job_family"] = candidate_job_family
+        raw["_debug_meta"]["candidate_seniority_exp_reason"] = exp_reason
+        raw["_debug_meta"]["candidate_seniority_top_experiences"] = [
+            {
+                "title": entry.get("title"),
+                "level": entry.get("level"),
+                "months_ago": entry.get("months_ago"),
+                "duration_months": entry.get("duration_months"),
+                "relevance_score": entry.get("relevance_score"),
+            }
+            for entry in top_entries
+        ]
 
     domain_requirements: List[DomainRequirement] = []
     raw_domains = _safe_list(job.get("domain_requirements") or raw.get("domain_requirements"))

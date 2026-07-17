@@ -1298,14 +1298,17 @@ def _gap_bucket(gap: float) -> SeniorityBucket:
     possible gaps are typically {.., 0.5, 1.0, 1.5, 2.0, 2.5, ..}.
 
     Semantics:
-    - none: same level / tiny gap (<=0.5)
+    - none: same level, a half-step transition, or one level above the role
     - small: normal promotion (<=1.0)  e.g., junior->mid, mid->senior
     - medium: big stretch but still sometimes interviewable (<=1.5)
               e.g., apprentice(0.5)->mid(2.0) gap=1.5
     - cliff: >=2.0 is usually unrealistic for typical hiring funnels
             e.g., junior->senior gap=2.0, intern->mid gap=2.0, apprentice->senior gap=2.5
     """
-    if gap < -0.5:
+    # One level above a role (for example mid -> junior) is common and does
+    # not justify the product label "overqualified". Reserve that label for
+    # a clear two-level mismatch such as senior -> junior or lead -> mid.
+    if gap < -1.0:
         return "overqualified"
     if gap <= 0.5:
         return "none"

@@ -4,7 +4,7 @@ from unittest.mock import patch
 from backend.ir.schema_v3 import AnalyzeIRv3, DomainRequirement, ToolEvidence
 from backend.llm import analyze_v3 as analyzer
 from backend.notion import writer
-from backend.scoring.scoring_engine_v3 import score_ir_v3, score_to_public_dict
+from backend.scoring.scoring_engine_v3 import _gap_bucket, score_ir_v3, score_to_public_dict
 
 
 def test_top_level_gemini_schema_survives_normalization():
@@ -61,6 +61,93 @@ def test_top_level_gemini_schema_survives_normalization():
     assert result.analysis_status == "success"
 
 
+def test_candidate_seniority_uses_job_family_relevant_resume_experience():
+    page_text = """Junior Software / DevOps Engineer
+    Build Python services, AWS infrastructure, and CI/CD automation."""
+    raw = {
+        "job_title": "Junior Software / DevOps Engineer",
+        "company": "Example",
+        "job_seniority_signal": "junior",
+        "job_seniority_evidence": "Junior Software / DevOps Engineer",
+        "domain_requirements": [],
+    }
+    resume = """Cloud Support Associate – AI/ML
+    JUL 2024 – PRESENT
+    Troubleshoot AWS, Linux, Docker, Terraform, and CI/CD workloads.
+
+    Commercial Analyst
+    JAN 2018 – JUN 2024
+    Managed budgeting, forecasting, and financial reporting."""
+
+    with patch.object(analyzer, "_extract_with_gemini_v3", return_value=raw), patch.object(
+        analyzer, "adjudicate_domains", side_effect=lambda domains, **_kwargs: domains
+    ):
+        result = analyzer.analyze_v3(
+            page_text=page_text,
+            title="Junior Software / DevOps Engineer",
+            candidate_profile={
+                "candidate_skills": ["AWS", "Linux", "Docker", "Terraform"],
+                "candidate_seniority_signal": "mid",
+                "seniority_reason": "global career history",
+                "evidence_claims": [
+                    {
+                        "resume_quote": "Troubleshoot AWS, Linux, Docker, Terraform, and CI/CD workloads.",
+                        "skills": ["AWS", "Linux", "Docker", "Terraform"],
+                        "domains": ["Cloud Computing"],
+                    }
+                ],
+            },
+            candidate_resume_text=resume,
+        )
+
+    assert result.candidate_seniority_signal == "junior_to_mid"
+    assert result.raw_llm_json["_debug_meta"]["candidate_seniority_job_family"] == "tech_swe"
+    assert result.raw_llm_json["_debug_meta"]["candidate_seniority_exp_reason"].startswith(
+        "relevant_experience_"
+    )
+
+
+def test_apprenticeship_progresses_to_junior_after_sustained_relevant_experience():
+    resume = """Cloud Support Apprentice — AWS
+    JUL 2024 – PRESENT
+    Troubleshoot production cloud workloads, implement automation, and resolve incidents.
+
+    Finance / Accounting Roles
+    JAN 2019 – JUN 2024
+    Managed budgeting, forecasting, and financial reporting. Python appears in a later section."""
+
+    level, reason, entries = analyzer._derive_candidate_level_from_experience(
+        resume, job_family="tech_swe"
+    )
+
+    assert level == "junior"
+    assert reason == "apprenticeship_progressed_by_experience"
+    assert all("Finance" not in entry["title"] for entry in entries)
+
+
+def test_jd_tool_extraction_drops_sentence_fragments_and_questions():
+    page_text = """Experience with a wide range of technology in mission critical environments. Additionally, learn quickly.
+    Are you experienced in?
+    Exposure to concepts such as virtualization, containers, configuration management, source management, and application deployment.
+    Infrastructure as code tools such as YAML, JSON, Ansible, CloudFormation or Terraform."""
+
+    tools = analyzer.extract_tools_from_jd(page_text)
+
+    assert "virtualization" in tools
+    assert "containers" in tools
+    assert "YAML" in tools
+    assert "JSON" in tools
+    assert "?" not in tools
+    assert "are you experienced in?" not in [tool.lower() for tool in tools]
+    assert not any("wide range of technology" in tool.lower() for tool in tools)
+    assert not any(tool.lower().startswith("and ") for tool in tools)
+
+
+def test_one_level_more_experienced_is_not_labeled_overqualified():
+    assert _gap_bucket(-1.0) == "none"
+    assert _gap_bucket(-2.0) == "overqualified"
+
+
 def _public_contract():
     ir = AnalyzeIRv3(
         job_title="Software Engineer",
@@ -108,7 +195,7 @@ def test_public_contract_contains_every_requirement_with_evidence_status():
     assert [tool["name"] for tool in by_name["Observability"]["tools"]] == []
 
 
-def test_notion_uses_compact_requirement_matrix_instead_of_repeated_sections():
+def test_notion_uses_user_facing_summary_without_evidence_matrix():
     contract = _public_contract()
     captured = {}
 
@@ -146,8 +233,12 @@ def test_notion_uses_compact_requirement_matrix_instead_of_repeated_sections():
     assert url == "https://notion.so/page"
     blocks = captured["children"]
     serialized = str(blocks)
-    assert "JD ↔ Resume Match Coverage" in serialized
+    assert "JD ↔ Resume Match Coverage" not in serialized
+    assert "JD evidence:" not in serialized
+    assert "Resume evidence" not in serialized
     assert "API Development" in serialized
     assert "Observability" in serialized
-    assert "Layered Breakdown" not in serialized
-    assert len(blocks) < 30
+    assert "⚠️ Gaps (recommended)" in serialized
+    assert "💪 Strengths" in serialized
+    assert "🔒 Decision Constraints" in serialized
+    assert "Your level: junior" in serialized

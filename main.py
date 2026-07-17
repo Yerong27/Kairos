@@ -1101,7 +1101,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 ) from exc
 
             cache_key = _sha256_text(
-                "kairos_v3_public:1.5",
+                "kairos_v3_public:1.6",
                 _canonical_jd_for_cache(req.page_text or ""),
                 resume_hash,
                 CANDIDATE_PROFILE_MODEL,
@@ -1132,6 +1132,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                     page_text=req.page_text,
                     title=req.title,
                     candidate_profile=candidate_profile_data,
+                    candidate_resume_text=resume_text,
                     output_language=req.output_language or "en",
                 )
                 timings_ms["llm_and_normalization"] = int(round((time.perf_counter() - llm_started) * 1000))
@@ -1182,6 +1183,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                             page_text=req.page_text,
                             title=req.title,
                             candidate_profile=candidate_profile_data,
+                            candidate_resume_text=resume_text,
                             output_language=req.output_language or "en",
                         )
                         if isinstance(api_data, dict):

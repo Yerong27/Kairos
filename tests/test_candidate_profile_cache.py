@@ -314,3 +314,4 @@ def test_job_analysis_uses_stored_profile_without_sending_raw_resume_to_jd_parse
         kwargs = jd_parser.call_args.kwargs
         assert "user_profile" not in kwargs
         assert kwargs["candidate_profile"]["candidate_skills"] == ["Python"]
+        assert kwargs["candidate_resume_text"] == resume_text
