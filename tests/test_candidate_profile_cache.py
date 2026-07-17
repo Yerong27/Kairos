@@ -74,6 +74,66 @@ def test_resume_parser_keeps_only_resume_grounded_claims():
     assert profile.candidate_seniority_signal == "junior_to_mid"
 
 
+def test_resume_parser_retries_truncated_json_with_compact_prompt():
+    resume = "Cloud Engineer\nBuilt production services with Python and FastAPI."
+    payload = {
+        "candidate_skills": ["Python", "FastAPI"],
+        "candidate_domains": ["API Development"],
+        "candidate_seniority_signal": "junior",
+        "seniority_reason": "Resume title signal",
+        "evidence_claims": [
+            {
+                "resume_quote": "Built production services with Python and FastAPI.",
+                "skills": ["Python", "FastAPI"],
+                "domains": ["API Development"],
+            }
+        ],
+        "roles": [],
+    }
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, prompt, **_kwargs):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return SimpleNamespace(text='{"candidate_skills":["Python"],"evidence_claims":[{"resume_quote":"unterminated')
+            return SimpleNamespace(text=json.dumps(payload))
+
+    with patch.object(resume_analyzer, "_ensure_configured"), patch.object(
+        resume_analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        profile = resume_analyzer.analyze_resume(resume)
+
+    assert profile.candidate_skills == ["Python", "FastAPI"]
+    assert len(calls) == 2
+    assert "compact retry" in calls[1]
+    assert "at most 12 evidence claims" in calls[1]
+
+
+def test_resume_parser_reports_friendly_error_after_two_incomplete_responses():
+    resume = "Cloud Engineer\nBuilt production services with Python and FastAPI."
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, *_args, **_kwargs):
+            return SimpleNamespace(text='{"candidate_skills":["Python')
+
+    with patch.object(resume_analyzer, "_ensure_configured"), patch.object(
+        resume_analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        try:
+            resume_analyzer.analyze_resume(resume)
+        except ValueError as exc:
+            assert "automatic compact retry" in str(exc)
+        else:
+            raise AssertionError("Expected incomplete JSON to fail after retry")
+
+
 def test_resume_profile_is_reused_until_resume_content_changes():
     client = TestClient(main.app)
     with tempfile.TemporaryDirectory() as tmp:

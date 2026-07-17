@@ -16,7 +16,7 @@ from backend.llm.analyze_v3 import _derive_candidate_level_from_experience, _nor
 
 
 CANDIDATE_PROFILE_SCHEMA_VERSION = "1.0"
-CANDIDATE_PROFILE_PROMPT_VERSION = "1.0"
+CANDIDATE_PROFILE_PROMPT_VERSION = "1.1"
 CANDIDATE_PROFILE_MODEL = (os.getenv("GEMINI_RESUME_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
 
 
@@ -48,26 +48,30 @@ def _ensure_configured() -> None:
     genai.configure(api_key=key)
 
 
-def analyze_resume(resume_text: str) -> CandidateProfile:
-    """Create a reusable, job-independent candidate profile from resume text."""
-    text = (resume_text or "").strip()
-    if len(text) < 30:
-        raise ValueError("Resume text is too short to analyze")
+def _resume_prompt(text: str, *, compact: bool = False) -> str:
+    claim_limit = 12 if compact else 20
+    skill_limit = 32 if compact else 50
+    role_limit = 10 if compact else 15
+    quote_limit = 160 if compact else 240
+    retry_note = (
+        "This is a compact retry because the previous JSON response was incomplete. "
+        if compact
+        else ""
+    )
+    return f"""You are the Resume Parser for Kairos.
 
-    _ensure_configured()
-    model = genai.GenerativeModel(CANDIDATE_PROFILE_MODEL)
-    prompt = f"""You are the Resume Parser for Kairos.
-
-Extract a job-independent candidate profile from the resume. Do not compare it
+{retry_note}Extract a job-independent candidate profile from the resume. Do not compare it
 with any job description. Capture broad transferable capabilities so the same
 profile can be reused for many roles.
 
 STRICT RULES:
-1. Every evidence claim and role evidence_quote must be copied verbatim from the resume.
-2. Do not invent skills, employers, dates, scope, metrics, or seniority.
-3. candidate_skills may include tools and portable capabilities supported by a valid evidence claim.
-4. Keep evidence claims atomic and concise. Return at most 40 claims and 80 skills.
-5. candidate_seniority_signal is only a preliminary label; Kairos also applies deterministic date/title rules.
+1. Every evidence claim and role evidence_quote must be one continuous verbatim substring from the resume.
+2. Keep every evidence quote under {quote_limit} characters. Never copy a whole section or paragraph.
+3. Do not invent skills, employers, dates, scope, metrics, or seniority.
+4. candidate_skills may include tools and portable capabilities supported by a valid evidence claim.
+5. Return at most {claim_limit} evidence claims, {skill_limit} candidate skills, and {role_limit} roles.
+6. Return at most 8 skills and 4 domains per evidence claim.
+7. Keep seniority_reason under 160 characters.
 
 <resume>
 {text[:50000]}
@@ -81,7 +85,7 @@ OUTPUT JSON ONLY:
   "seniority_reason": "short string",
   "evidence_claims": [
     {{
-      "resume_quote": "verbatim resume text",
+      "resume_quote": "short verbatim resume substring",
       "skills": ["string"],
       "domains": ["string"],
       "role": "string or null"
@@ -92,24 +96,60 @@ OUTPUT JSON ONLY:
       "title": "string",
       "organization": "string or null",
       "date_range": "string or null",
-      "evidence_quote": "verbatim resume text or null"
+      "evidence_quote": "short verbatim resume substring or null"
     }}
   ]
 }}
 """
 
-    response = model.generate_content(
-        prompt,
-        generation_config=GenerationConfig(
-            temperature=0.0,
-            top_p=1.0,
-            top_k=1,
-            max_output_tokens=4096,
-            response_mime_type="application/json",
-        ),
-        request_options={"timeout": 30},
-    )
-    raw: Dict[str, Any] = json.loads(response.text)
+
+def _parse_json_response(response: Any) -> Dict[str, Any]:
+    response_text = str(getattr(response, "text", "") or "").strip()
+    if response_text.startswith("```"):
+        response_text = re.sub(r"^```(?:json)?\s*", "", response_text, flags=re.IGNORECASE)
+        response_text = re.sub(r"\s*```$", "", response_text)
+    parsed = json.loads(response_text)
+    if not isinstance(parsed, dict):
+        raise ValueError("Gemini resume response must be a JSON object")
+    return parsed
+
+
+def _generate_profile_json(model: Any, text: str) -> Dict[str, Any]:
+    last_error: Exception | None = None
+    for compact, max_tokens in ((False, 6144), (True, 4096)):
+        response = model.generate_content(
+            _resume_prompt(text, compact=compact),
+            generation_config=GenerationConfig(
+                temperature=0.0,
+                top_p=1.0,
+                top_k=1,
+                max_output_tokens=max_tokens,
+                response_mime_type="application/json",
+            ),
+            request_options={"timeout": 30},
+        )
+        try:
+            return _parse_json_response(response)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            if compact:
+                break
+
+    raise ValueError(
+        "Gemini returned incomplete resume JSON after an automatic compact retry. "
+        "Please re-upload the resume."
+    ) from last_error
+
+
+def analyze_resume(resume_text: str) -> CandidateProfile:
+    """Create a reusable, job-independent candidate profile from resume text."""
+    text = (resume_text or "").strip()
+    if len(text) < 30:
+        raise ValueError("Resume text is too short to analyze")
+
+    _ensure_configured()
+    model = genai.GenerativeModel(CANDIDATE_PROFILE_MODEL)
+    raw = _generate_profile_json(model, text)
     resume_flat_lower = _normalize(text).lower()
 
     claims: List[CandidateEvidenceClaim] = []
