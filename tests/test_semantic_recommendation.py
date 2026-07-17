@@ -204,3 +204,51 @@ def test_large_requirement_loss_marks_analysis_degraded():
     assert result.raw_llm_json["_debug_meta"]["normalization_incomplete"] is True
     contract = score_to_public_dict(score_ir_v3(result))
     assert contract["analysis_quality"]["score_reliable"] is False
+
+
+def test_paraphrased_jd_evidence_is_repaired_to_an_exact_source_passage():
+    jd = (
+        "Strong hands-on experience with AWS cloud-native services is required. "
+        "Exposure to AI and generative AI services on AWS, such as Amazon Bedrock, "
+        "is desirable. Ability to analyse customer requirements and communicate "
+        "clearly with technical stakeholders."
+    )
+
+    repaired = analyzer._repair_jd_evidence_quote(
+        page_text=jd,
+        requirement_name="AI and Generative AI Services on AWS",
+        proposed_quote="Built AI solutions using Amazon Bedrock.",
+        evidence_summary="Exposure to generative AI services in AWS.",
+    )
+
+    assert repaired
+    assert repaired.lower() in jd.lower()
+    assert "generative ai services on aws" in repaired.lower()
+
+
+def test_evidence_repair_refuses_an_unrelated_requirement():
+    repaired = analyzer._repair_jd_evidence_quote(
+        page_text="The role requires clear communication and stakeholder collaboration.",
+        requirement_name="Registered Nurse Licence",
+        proposed_quote="Current nursing registration is mandatory.",
+        evidence_summary="Must hold a nursing licence.",
+    )
+
+    assert repaired == ""
+
+
+def test_evidence_repair_supports_a_semantic_label_not_written_verbatim():
+    jd = (
+        "Ability to analyse customer requirements, translate them into effective "
+        "technical solutions, and guide customers through delivery decisions."
+    )
+
+    repaired = analyzer._repair_jd_evidence_quote(
+        page_text=jd,
+        requirement_name="Communication and Stakeholder Management",
+        proposed_quote="Translate customer requirements and guide stakeholder decisions.",
+        evidence_summary="Customer-facing requirements discovery and technical guidance.",
+    )
+
+    assert repaired
+    assert repaired.lower() in jd.lower()

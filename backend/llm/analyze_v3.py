@@ -41,6 +41,7 @@ import os
 import re
 import time
 import pathlib
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import google.generativeai as genai
@@ -289,6 +290,121 @@ def _extract_illustrative_terms(evidence_quote: str) -> List[str]:
         for normalized in _normalize_tool_token(part.strip(" .:;()[]")):
             values.append(normalized)
     return _dedupe_keep_order(values)[:16]
+
+
+_EVIDENCE_REPAIR_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "using",
+    "with",
+    "experience",
+    "knowledge",
+    "skills",
+    "required",
+    "preferred",
+}
+
+
+def _evidence_repair_tokens(value: str) -> List[str]:
+    return [
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9+#./-]*", str(value or "").lower())
+        if len(token) > 1 and token not in _EVIDENCE_REPAIR_STOPWORDS
+    ]
+
+
+def _repair_jd_evidence_quote(
+    *,
+    page_text: str,
+    requirement_name: str,
+    proposed_quote: str,
+    evidence_summary: str = "",
+) -> str:
+    """Map a paraphrased model citation back to one exact JD passage."""
+    page_flat = _normalize_whitespace(page_text)
+    if not page_flat:
+        return ""
+
+    segments = [
+        _normalize_whitespace(part)
+        for part in re.split(r"(?:\n+|(?<=[.!?;])\s+|\s+[•●▪]\s+)", str(page_text or ""))
+    ]
+    candidates = [
+        segment
+        for segment in segments
+        if 3 <= len(segment.split()) <= 90
+    ]
+
+    name_tokens = set(_evidence_repair_tokens(requirement_name))
+    target_text = " ".join(
+        value for value in (requirement_name, proposed_quote, evidence_summary) if value
+    )
+    target_tokens = set(_evidence_repair_tokens(target_text))
+
+    # Add bounded exact windows around distinctive requirement terms. This
+    # handles LinkedIn text where bullets were flattened into one paragraph.
+    page_lower = page_flat.lower()
+    for token in sorted(name_tokens, key=len, reverse=True)[:8]:
+        for match in list(re.finditer(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", page_lower))[:3]:
+            start = max(0, match.start() - 180)
+            end = min(len(page_flat), match.end() + 320)
+            while start > 0 and page_flat[start - 1] not in ".!?;":
+                start -= 1
+                if match.start() - start >= 260:
+                    break
+            while end < len(page_flat) and page_flat[end - 1] not in ".!?;":
+                end += 1
+                if end - match.end() >= 420:
+                    break
+            candidate = page_flat[start:end].strip(" .")
+            if candidate:
+                candidates.append(candidate)
+
+    best_quote = ""
+    best_score = 0.0
+    seen = set()
+    normalized_target = _normalize_whitespace(target_text).lower()
+    for candidate in candidates:
+        key = candidate.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        candidate_tokens = set(_evidence_repair_tokens(candidate))
+        if not candidate_tokens:
+            continue
+        name_hits = len(name_tokens & candidate_tokens)
+        target_hits = len(target_tokens & candidate_tokens)
+        # Semantic requirement labels need not appear verbatim in the JD. When
+        # the label itself has no hit, require at least two supporting terms
+        # from the model's proposed quote/summary before considering a passage.
+        if name_tokens and name_hits == 0 and target_hits < 2:
+            continue
+        coverage = target_hits / float(max(1, len(target_tokens)))
+        precision = target_hits / float(max(1, len(candidate_tokens)))
+        sequence = SequenceMatcher(None, normalized_target, key).ratio()
+        score = 0.55 * coverage + 0.20 * precision + 0.25 * sequence
+        if score > best_score:
+            best_score = score
+            best_quote = candidate
+
+    if best_score < 0.22:
+        return ""
+    if not _validate_quote(best_quote, page_flat.lower()):
+        return ""
+    return best_quote[:900]
 
 
 def _get_domain_catalog(job_family: str):
@@ -1116,14 +1232,23 @@ OUTPUT LANGUAGE: {output_language}
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
         jd_text_normalized = _normalize_whitespace(page_text).lower()
-        invalid_jd_evidence = [
-            requirement.name
-            for requirement in parsed_ir.domain_requirements
-            if not _validate_quote(
+        invalid_jd_evidence = []
+        for requirement in parsed_ir.domain_requirements:
+            if _validate_quote(
                 str(requirement.evidence_quote or ""),
                 jd_text_normalized,
+            ):
+                continue
+            repaired_quote = _repair_jd_evidence_quote(
+                page_text=page_text,
+                requirement_name=requirement.name,
+                proposed_quote=str(requirement.evidence_quote or ""),
+                evidence_summary=str(requirement.evidence_summary or ""),
             )
-        ]
+            if repaired_quote:
+                requirement.evidence_quote = repaired_quote
+            else:
+                invalid_jd_evidence.append(requirement.name)
         if invalid_jd_evidence:
             raise ValueError(
                 "Gemini returned requirement evidence that was not copied from the JD: "
