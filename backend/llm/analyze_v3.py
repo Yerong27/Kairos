@@ -53,6 +53,7 @@ from backend.ir.schema_v3 import (
     Importance,
     SeniorityLabel,
     DomainFacet,
+    ExtractedOwnership,
 )
 from backend.ir.domain_catalog import load_domain_catalogs, adjudicate_domains
 from backend.ir.canonicalize import canon_domain, canon_tool
@@ -932,9 +933,11 @@ GLOBAL RULES (STRICT KAIROS LOGIC):
    - Each tool in `examples[]` must include an evidence_quote copied from the JD.
 
 4) COUNT & COVERAGE:
-   - Aim for comprehensive coverage (typically 8–20 Domain Requirements).
+   - Aim for comprehensive coverage without duplication (typically 6–14 Domain Requirements).
    - Do NOT squash distinct capabilities just to save space.
    - Do NOT omit technical/soft skills if they are core to the role.
+   - Keep evidence_summary to at most 20 words and evidence_quote to the shortest
+     verbatim clause that proves the requirement.
 
 5) EVIDENCE:
    - **evidence_summary**: Summarize the requirement context (1 sentence) for human understanding.
@@ -1010,7 +1013,10 @@ OUTPUT LANGUAGE: {output_language}
         temperature=0.0,
         top_p=1.0,
         top_k=1,
-        max_output_tokens=8192,
+        # The previous 8192-token ceiling encouraged very verbose responses and
+        # increased latency. The schema remains exhaustive, but summaries and
+        # quotes are intentionally concise.
+        max_output_tokens=6144,
         response_mime_type="application/json",
     )
 
@@ -1018,7 +1024,11 @@ OUTPUT LANGUAGE: {output_language}
     rule_seniority = _extract_seniority_rules(page_text)
 
     try:
-        resp = model.generate_content(prompt, generation_config=generation_config)
+        resp = model.generate_content(
+            prompt,
+            generation_config=generation_config,
+            request_options={"timeout": 30},
+        )
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
 
@@ -1049,11 +1059,9 @@ OUTPUT LANGUAGE: {output_language}
         # Adjudicate against catalog (THE Deterministic Step)
         job_family = _detect_job_family(page_text)
         catalog = _get_domain_catalog(job_family)
-        try:
-            raw.setdefault("_debug_meta", {})
-            raw["_debug_meta"]["job_family"] = job_family
-        except Exception:
-            pass
+        if isinstance(parsed_ir.raw_llm_json, dict):
+            parsed_ir.raw_llm_json.setdefault("_debug_meta", {})
+            parsed_ir.raw_llm_json["_debug_meta"]["job_family"] = job_family
         # Note: adjudicate_domains now handles verification internally!
         # So we do NOT call _verify_spans here anymore.
         parsed_ir.domain_requirements = adjudicate_domains(
@@ -2105,11 +2113,13 @@ def analyze_v3(
         candidate_seniority_numeric = _level_num(exp_cap)
         candidate_seniority_reason = "exp_floor_cap_applied"
 
-    candidate_skills = _clean_candidate_skill_list(cand.get("skills"))
+    # _extract_with_gemini_v3 returns the validated AnalyzeIRv3 schema at the
+    # top level. Keep compatibility with older cached/nested response shapes.
+    candidate_skills = _clean_candidate_skill_list(cand.get("skills") or raw.get("candidate_skills"))
     candidate_skills = [canon_tool(s) or s for s in (candidate_skills or [])]
 
     domain_requirements: List[DomainRequirement] = []
-    raw_domains = _safe_list(job.get("domain_requirements"))
+    raw_domains = _safe_list(job.get("domain_requirements") or raw.get("domain_requirements"))
     if len(raw_domains) > 22:
         raw_domains = raw_domains[:22]
 
@@ -2301,9 +2311,15 @@ def analyze_v3(
     if len(domain_requirements) > 14:
         domain_requirements = domain_requirements[:14]
 
-    evidence_hints = job.get("evidence_hints") or []
-    if not isinstance(evidence_hints, list):
-        evidence_hints = []
+    evidence_hints = job.get("evidence_hints") or raw.get("evidence_hints") or {}
+    if not isinstance(evidence_hints, dict):
+        evidence_hints = {}
+
+    ownership_raw = job.get("ownership_and_scope") or raw.get("ownership_and_scope") or {}
+    try:
+        ownership_and_scope = ExtractedOwnership.model_validate(ownership_raw)
+    except Exception:
+        ownership_and_scope = ExtractedOwnership()
 
     try:
         raw.setdefault("_debug_meta", {})
@@ -2333,21 +2349,6 @@ def analyze_v3(
         if isinstance(raw.get("job"), dict):
             raw["job"]["tools_in_jd"] = jd_tools
 
-        # Inject tools into examples so scoring sees them as JD tools (bonus-only)
-        for dr in domain_requirements:
-            try:
-                existing = {(_normalize_whitespace(getattr(ex, "name", "") or "")).lower() for ex in (dr.examples or [])}
-                for t in jd_tools[:15]:
-                    key = _normalize_whitespace(t).lower()
-                    if not key or key in existing:
-                        continue
-                    dr.examples.append(ToolEvidence(name=t, importance="should", evidence_quote=None))
-                    existing.add(key)
-                if len(dr.examples) > 18:
-                    dr.examples = dr.examples[:18]
-            except Exception:
-                pass
-
     return AnalyzeIRv3(
         job_title=final_job_title,
         company=company,
@@ -2357,8 +2358,10 @@ def analyze_v3(
         candidate_skills=candidate_skills,
         domain_requirements=domain_requirements,
         tools_in_jd=jd_tools,
-        evidence_hints=[_normalize_whitespace(str(x)) for x in evidence_hints if str(x).strip()],
+        ownership_and_scope=ownership_and_scope,
+        evidence_hints=evidence_hints,
         raw_llm_json=raw,
+        analysis_status="success" if domain_requirements else "degraded",
         model_used=_DEFAULT_MODEL,
     )
 

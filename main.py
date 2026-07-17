@@ -77,7 +77,10 @@ KAIROS_RUN_ID = os.environ.get("KAIROS_RUN_ID", "").strip() or "run1"
 class AnalyzeRequest(BaseModel):
     url: Optional[str] = None
     title: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None
     page_text: str = Field(..., min_length=50, max_length=50_000)
+    extraction_meta: Optional[Dict[str, Any]] = None
     output_language: Optional[str] = "en"
     use_v3: bool = False
 
@@ -364,6 +367,27 @@ def _sha256_text(*parts: str) -> str:
         h.update((p or "").encode("utf-8"))
         h.update(b"\n---\n")
     return h.hexdigest()
+
+
+def _canonical_jd_for_cache(text: str) -> str:
+    """Remove harmless LinkedIn UI churn without changing JD wording."""
+    dynamic = re.compile(
+        r"^(?:reposted|posted)\s+\d+\s+(?:minute|hour|day|week)s?\s+ago$|"
+        r"^\d[\d,]*\s+(?:applicant|applicants)$|^over\s+\d[\d,]*\s+applicants$|"
+        r"^\d[\d,]*\s+people\s+clicked\s+apply$",
+        re.IGNORECASE,
+    )
+    lines = []
+    for raw_line in (text or "").replace("\r", "").splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if line and not dynamic.match(line):
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _contract_is_reliable(obj: Any) -> bool:
+    quality = obj.get("analysis_quality") if isinstance(obj, dict) else None
+    return bool(isinstance(quality, dict) and quality.get("score_reliable"))
 
 
 def _read_json_file(path: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -866,14 +890,16 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
         # v3 path
         # -----------------------------
         if use_v3:
+            request_started = time.perf_counter()
+            timings_ms: Dict[str, int] = {}
             candidate_evidence_text = _extract_candidate_evidence_text(resume_text)
             extra_tokens = _extract_explicit_skill_tokens(resume_text)
             if extra_tokens:
                 candidate_evidence_text += "\n\nHeuristic skills tokens (tool bonus only): " + ", ".join(extra_tokens)
 
             cache_key = _sha256_text(
-                "kairos_v3_public:1.3",
-                req.page_text or "",
+                "kairos_v3_public:1.4",
+                _canonical_jd_for_cache(req.page_text or ""),
                 resume_text or "",
                 req.title or "",
                 req.output_language or "en",
@@ -883,39 +909,60 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
             cache_hit = False
             api_data: Dict[str, Any] = {}
 
+            cache_started = time.perf_counter()
             if (not KAIROS_DISABLE_CACHE) and cache_path.exists():
                 cached = _read_json_file(cache_path)
-                if _cache_looks_like_contract(cached):
+                if _cache_looks_like_contract(cached) and _contract_is_reliable(cached):
                     api_data = cached  # type: ignore[assignment]
                     cache_hit = True
+            timings_ms["cache_lookup"] = int(round((time.perf_counter() - cache_started) * 1000))
 
             ir3 = None
             score_result = None
 
             if not cache_hit:
+                llm_started = time.perf_counter()
                 ir3 = kairos_analyze_v3(  # type: ignore[misc]
                     page_text=req.page_text,
                     title=req.title,
                     user_profile=resume_text,
                     output_language=req.output_language or "en",
                 )
+                timings_ms["llm_and_normalization"] = int(round((time.perf_counter() - llm_started) * 1000))
 
+                scoring_started = time.perf_counter()
                 score_result = _call_score_ir_v3_with_optional_candidate_text(ir3, candidate_evidence_text)
                 api_data = score_to_public_dict(score_result)  # type: ignore[misc]
+                timings_ms["scoring"] = int(round((time.perf_counter() - scoring_started) * 1000))
+
+                if not _contract_is_reliable(api_data):
+                    error_detail = "The model did not return enough verified JD requirements."
+                    hints = getattr(ir3, "evidence_hints", None)
+                    if isinstance(hints, dict) and hints.get("error"):
+                        error_detail = _clamp_text(_safe_str(hints.get("error")), 500)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Analysis was incomplete and was not written to Notion. "
+                            f"Reason: {error_detail}"
+                        ),
+                    )
 
                 if isinstance(api_data, dict):
                     api_data["_job_meta"] = {
                         "job_title": getattr(ir3, "job_title", None),
-                        "company": getattr(ir3, "company", None),
-                        "location": getattr(ir3, "location", None),
+                        "company": req.company or getattr(ir3, "company", None),
+                        "location": req.location or getattr(ir3, "location", None),
                         "title_input": req.title,
                         "url_input": req.url,
+                        "extraction": req.extraction_meta or {},
                     }
                     api_data["_candidate_meta"] = {
                         "evidence_preview": _clamp_text(candidate_evidence_text, 800),
                         "evidence_mode": "extracted_lines",
                     }
-                    _write_json_file(cache_path, api_data)
+                    if _contract_is_reliable(api_data):
+                        _write_json_file(cache_path, api_data)
 
             if cache_hit:
                 meta = api_data.get("_job_meta") if isinstance(api_data, dict) else None
@@ -993,6 +1040,10 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
 
             if (job_title or "").strip().lower() == "unknown" and (req.title or "").strip():
                 job_title = req.title.strip()
+            if (company or "").strip().lower() == "unknown" and (req.company or "").strip():
+                company = req.company.strip()
+            if (location or "").strip().lower() == "unknown" and (req.location or "").strip():
+                location = req.location.strip()
 
             # Phase 2: Extract Ownership Signals from IR (if available)
             ownership_data = None
@@ -1042,6 +1093,12 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                         "path": str(cache_path),
                         "disabled": bool(KAIROS_DISABLE_CACHE),
                     },
+                    "timings_ms": timings_ms,
+                    "input": {
+                        "jd_chars": len(req.page_text or ""),
+                        "resume_chars": len(resume_text or ""),
+                        "extraction": req.extraction_meta or {},
+                    },
                     "score": api_data,
                     "debug": contract_debug,
                     "raw_llm_json": getattr(ir3, "raw_llm_json", None) if ir3 is not None else None,
@@ -1068,6 +1125,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
             if not notion_database_id:
                 raise HTTPException(status_code=400, detail="No Notion database selected.")
 
+            notion_started = time.perf_counter()
             notion_url = create_notion_page(
                 req,
                 response_obj,
@@ -1077,6 +1135,9 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 notion_database_id=notion_database_id,
                 notion_version=NOTION_VERSION,
             )
+            timings_ms["notion_write"] = int(round((time.perf_counter() - notion_started) * 1000))
+            timings_ms["total"] = int(round((time.perf_counter() - request_started) * 1000))
+            response_obj.raw_json["timings_ms"] = timings_ms
             if not notion_url:
                 raise HTTPException(
                     status_code=502,

@@ -611,6 +611,145 @@ def _render_decision_constraints_to_notion(public_contract: Dict[str, Any], resp
     return blocks
 
 
+def _render_requirement_matrix_to_notion(public_contract: Dict[str, Any], resp: Any) -> List[dict]:
+    """Render every verified JD requirement once, with JD and resume evidence."""
+    requirements = _get_in(public_contract, ["requirements"], {})
+    if not isinstance(requirements, dict):
+        return []
+    items = [x for x in _as_list(requirements.get("items")) if isinstance(x, dict)]
+    if not items:
+        return []
+
+    counts = requirements.get("counts") if isinstance(requirements.get("counts"), dict) else {}
+    quality = _get_in(public_contract, ["analysis_quality"], {})
+    reliable = bool(quality.get("score_reliable")) if isinstance(quality, dict) else True
+    total = int(counts.get("total", len(items)) or len(items))
+    matched = int(counts.get("matched", 0) or 0)
+    partial = int(counts.get("partial", 0) or 0)
+    missing = int(counts.get("missing", 0) or 0)
+    must_total = int(counts.get("must_total", 0) or 0)
+    must_missing = int(counts.get("must_missing", 0) or 0)
+
+    blocks: List[dict] = [
+        _notion_heading("🎯 JD ↔ Resume Match Coverage", level=2),
+        {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "icon": {"emoji": "✅" if reliable and must_missing == 0 else "⚠️"},
+                "rich_text": _notion_rich_text(
+                    f"{matched} matched • {partial} partial • {missing} missing • {total} total"
+                    + (f" • MUST missing {must_missing}/{must_total}" if must_total else "")
+                    + (" • Score reliable" if reliable else " • Score NOT reliable")
+                ),
+            },
+        },
+        _notion_paragraph(
+            "Matched means Kairos found resume evidence above its matching threshold. Partial means related evidence exists but should be made more explicit. Missing means Kairos found no resume evidence; do not add it unless it is true."
+        ),
+    ]
+
+    status_icon = {"matched": "✅", "partial": "🟡", "missing": "❌", "unverified": "❓"}
+    importance_order = {"must": 0, "should": 1, "nice_to_have": 2, "nice": 2, "unknown": 3}
+    status_order = {"missing": 0, "partial": 1, "matched": 2, "unverified": 3}
+    ordered = sorted(
+        items,
+        key=lambda x: (
+            importance_order.get(_safe_str(x.get("importance")).lower(), 3),
+            status_order.get(_safe_str(x.get("status")).lower(), 3),
+            _safe_str(x.get("name")).lower(),
+        ),
+    )
+
+    current_importance = None
+    for item in ordered[:30]:
+        importance = _safe_str(item.get("importance"), "unknown").lower()
+        if importance != current_importance:
+            current_importance = importance
+            label = {"must": "MUST requirements", "should": "SHOULD requirements", "nice_to_have": "NICE-TO-HAVE", "nice": "NICE-TO-HAVE"}.get(importance, "Other requirements")
+            blocks.append(_notion_heading(label, level=3))
+
+        status = _safe_str(item.get("status"), "unverified").lower()
+        name = _safe_str(item.get("name"), "Unnamed requirement")
+        title = f"{status_icon.get(status, '❓')} {name} — {status.replace('_', ' ')}"
+
+        detail_children: List[dict] = []
+        jd_evidence = _safe_str(item.get("jd_evidence")).strip()
+        if jd_evidence:
+            detail_children.append(_notion_paragraph(_clamp_text(f"JD evidence: {jd_evidence}", 800)))
+        resume_evidence = [_safe_str(x).strip() for x in _as_list(item.get("resume_evidence")) if _safe_str(x).strip()]
+        if resume_evidence:
+            detail_children.extend(_notion_bullets("Resume evidence", resume_evidence, heading_level=3, max_items=3))
+        else:
+            detail_children.append(_notion_paragraph("Resume evidence: none found."))
+
+        tools = [x for x in _as_list(item.get("tools")) if isinstance(x, dict)]
+        if tools:
+            tool_text = ", ".join(
+                f"{_safe_str(x.get('name'))} ({_safe_str(x.get('status'), 'unverified')})" for x in tools[:15]
+            )
+            detail_children.append(_notion_paragraph(_clamp_text(f"JD tools: {tool_text}", 900)))
+
+        blocks.append(
+            {
+                "object": "block",
+                "type": "toggle",
+                "toggle": {"rich_text": _notion_rich_text(title), "children": detail_children[:20]},
+            }
+        )
+
+    tool_items = [x for x in _as_list(_get_in(public_contract, ["tools", "items"], [])) if isinstance(x, dict)]
+    if tool_items:
+        blocks.append(_notion_divider())
+        blocks.append(_notion_heading("🧩 Explicit JD Tools / ATS Keywords", level=2))
+        blocks.append(
+            _notion_paragraph(
+                "These are explicit JD mentions. They help ATS keyword coverage, but Kairos treats tools as supporting evidence rather than hard blockers."
+            )
+        )
+        for status, label in (("missing", "❌ Missing"), ("partial", "🟡 Partial"), ("matched", "✅ Matched")):
+            names = [_safe_str(x.get("name")) for x in tool_items if _safe_str(x.get("status")) == status]
+            if names:
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "toggle",
+                        "toggle": {
+                            "rich_text": _notion_rich_text(f"{label} ({len(names)})"),
+                            "children": _notion_bullets("", names, heading_level=3, max_items=40),
+                        },
+                    }
+                )
+
+    actions = _norm_strengths_gaps_items(_as_list(public_contract.get("actions")))
+    if actions:
+        blocks.append(_notion_divider())
+        blocks.extend(_notion_bullets("🛠 Resume / Skill Actions", actions, heading_level=2, max_items=10))
+
+    blocks.append(_notion_divider())
+    blocks.append(
+        {
+            "object": "block",
+            "type": "toggle",
+            "toggle": {
+                "rich_text": _notion_rich_text("ℹ️ Score and seniority details"),
+                "children": _notion_bullets(
+                    "",
+                    [
+                        f"Skill match: {getattr(resp, 'distance_score', 0)}%",
+                        f"Final score: {getattr(resp, 'final_score', 0)}/100",
+                        f"Seniority gap: {getattr(resp, 'seniority_gap', 'unknown')}",
+                        f"Score cap: {getattr(resp, 'cap', 100)}",
+                    ],
+                    heading_level=3,
+                    max_items=10,
+                ),
+            },
+        }
+    )
+    return blocks
+
+
 def create_notion_page(
     req: Any,
     resp: Any,
@@ -672,7 +811,17 @@ def create_notion_page(
         _notion_divider(),
     ]
 
-    if isinstance(public_contract, dict):
+    requirement_items = (
+        _as_list(_get_in(public_contract, ["requirements", "items"], []))
+        if isinstance(public_contract, dict)
+        else []
+    )
+    if isinstance(public_contract, dict) and requirement_items:
+        blocks.extend(_render_requirement_matrix_to_notion(public_contract, resp))
+
+    # Backward-compatible renderer for old cache entries that predate the
+    # requirement matrix contract.
+    if isinstance(public_contract, dict) and not requirement_items:
         display_required = _as_list(public_contract.get("display_required_domains") or [])
         display_evidence = public_contract.get("display_domain_evidence") or {}
         tools_in_jd = _as_list(public_contract.get("tools_in_jd") or [])

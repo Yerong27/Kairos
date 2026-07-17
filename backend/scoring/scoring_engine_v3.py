@@ -400,6 +400,24 @@ def _get_candidate_skills(job_ir: Any, candidate_skills: Optional[List[str]] = N
         out.append(t)
     return out
 
+
+def _get_explicit_jd_tools(job_ir: Any) -> List[str]:
+    tools = _get_field(job_ir, "tools_in_jd", None)
+    if not isinstance(tools, list):
+        raw = _get_raw_llm(job_ir)
+        tools = raw.get("tools_in_jd") if isinstance(raw.get("tools_in_jd"), list) else None
+        if tools is None and isinstance(raw.get("job"), dict):
+            tools = raw["job"].get("tools_in_jd")
+    normalized = _canonicalize_skill_list(_normalize_skill_list(tools if isinstance(tools, list) else []))
+    seen = set()
+    out: List[str] = []
+    for tool in normalized:
+        key = _norm(tool)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(tool)
+    return out
+
 def _get_job_level(job_ir: Any) -> SeniorityLabel:
     lvl = _get_field(job_ir, "job_seniority_signal", None)
     if isinstance(lvl, str) and lvl.strip():
@@ -1714,6 +1732,31 @@ def _match_confidence_string(s: str, cand_phrases: set, cand_compacts: set, entr
     return _noisy_or(matched)
 
 
+def _matching_candidate_evidence(anchor_terms: List[str], entries: List[_CandidateEntry], limit: int = 3) -> List[str]:
+    """Return the resume claims that actually supported a domain match."""
+    out: List[str] = []
+    seen = set()
+    anchors = [(_canon_token(a), _compact(_canon_token(a))) for a in (anchor_terms or [])]
+    anchors = [(a, c) for a, c in anchors if a]
+    for entry in entries:
+        for anchor, compact in anchors:
+            matched = (
+                anchor == entry.text
+                or (compact and compact == entry.compact)
+                or (len(anchor) >= 3 and f" {anchor} " in f" {entry.text} ")
+            )
+            if not matched:
+                continue
+            key = entry.text.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(entry.text[:280])
+            break
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
 def _domain_match_confidence(
     domain: DomainRequirement,
     *,
@@ -2077,6 +2120,7 @@ def score_ir_v3(
         cand_avg_conf,
         cand_keyword_ratio,
     ) = _make_candidate_index(cand_skills)
+    explicit_jd_tools = _get_explicit_jd_tools(job_ir)
 
     gap = _seniority_gap_numeric(job_level, cand_numeric)
     bucket = _gap_bucket(gap)
@@ -2119,6 +2163,8 @@ def score_ir_v3(
 
     anchors_used: Dict[str, List[str]] = {}
     domain_anchor_hits: Dict[str, List[str]] = {}
+    domain_match_confidence: Dict[str, float] = {}
+    domain_resume_evidence: Dict[str, List[str]] = {}
 
     raw_score = 0
     raw_max = 0
@@ -2206,6 +2252,8 @@ def score_ir_v3(
             weak_threshold=DOMAIN_WEAK_THRESHOLD,
             exact_floor=DOMAIN_EXACT_FLOOR,
         )
+        domain_match_confidence[d_name] = round(float(dom_conf), 3)
+        domain_resume_evidence[d_name] = _matching_candidate_evidence(anchors, cand_entries)
 
         # Capture anchors that actually matched (>0 confidence) for debug transparency
         matched_anchors = []
@@ -2337,6 +2385,35 @@ def score_ir_v3(
                 else:
                     per_tool_should[ex_name] = "missing"
                     missing_tool_should_examples.append(ex_name)
+
+    # Deterministically extracted JD tools are evaluated once at the top level.
+    # They must not be copied into every domain, which previously produced a
+    # repetitive and misleading requirement matrix.
+    for tool_name in explicit_jd_tools:
+        key = _norm(tool_name)
+        if not key or key in tool_should_seen:
+            continue
+        tool_should_seen.add(key)
+        tool_should_total_unique += 1
+        tool_should_examples.append(tool_name)
+        tool_conf = _tool_match_confidence(
+            ToolEvidence(name=tool_name, importance="should", evidence_quote=None),
+            cand_phrases=cand_phrases,
+            cand_compacts=cand_compacts,
+            entries=cand_entries,
+        )
+        if tool_conf <= 0.0 and candidate_text_blob and _tool_text_hit(tool_name, candidate_text_blob):
+            tool_conf = TOOL_HIT_THRESHOLD
+        if tool_conf > 0.0:
+            per_tool_should[tool_name] = "hit" if tool_conf >= TOOL_HIT_THRESHOLD else "soft_hit"
+            if should_tool_bonus_used < SHOULD_TOOL_BONUS_CAP:
+                bonus_add = int(round(SHOULD_TOOL_BONUS * tool_conf))
+                raw_score += bonus_add
+                tool_bonus_raw += bonus_add
+                should_tool_bonus_used += 1
+        else:
+            per_tool_should[tool_name] = "missing"
+            missing_tool_should_examples.append(tool_name)
 
     # Bonus max is based on unique tool mentions (capped)
     bonus_cap_effective = min(int(SHOULD_TOOL_BONUS_CAP), int(tool_should_total_unique))
@@ -2518,6 +2595,75 @@ def score_ir_v3(
     elif _get_raw_llm(job_ir):
         domains_source = "raw_llm_json"
 
+    requirement_matrix: List[Dict[str, Any]] = []
+    for domain in (domains or []):
+        name = str(getattr(domain, "name", "") or "").strip()
+        if not name or getattr(domain, "domain_id", "") == "other_info":
+            continue
+        raw_status = per_domain.get(name, "unverified")
+        status = {
+            "hit": "matched",
+            "soft_hit": "partial",
+            "weak_hit": "partial",
+            "missing": "missing",
+        }.get(raw_status, "unverified")
+        tools: List[Dict[str, str]] = []
+        for example in (getattr(domain, "examples", None) or []):
+            tool_name = str(getattr(example, "name", "") or "").strip()
+            if not tool_name:
+                continue
+            tool_status = per_tool_should.get(tool_name, "unverified")
+            tools.append(
+                {
+                    "name": tool_name,
+                    "status": {
+                        "hit": "matched",
+                        "soft_hit": "partial",
+                        "missing": "missing",
+                    }.get(tool_status, "unverified"),
+                }
+            )
+        requirement_matrix.append(
+            {
+                "name": name,
+                "importance": str(getattr(domain, "importance", "unknown") or "unknown"),
+                "status": status,
+                "match_confidence": domain_match_confidence.get(name, 0.0),
+                "jd_evidence": str(getattr(domain, "evidence_quote", "") or "")[:500],
+                "resume_evidence": domain_resume_evidence.get(name, []),
+                "tools": tools[:15],
+            }
+        )
+
+    requirement_counts = {
+        "total": len(requirement_matrix),
+        "matched": sum(1 for x in requirement_matrix if x["status"] == "matched"),
+        "partial": sum(1 for x in requirement_matrix if x["status"] == "partial"),
+        "missing": sum(1 for x in requirement_matrix if x["status"] == "missing"),
+        "unverified": sum(1 for x in requirement_matrix if x["status"] == "unverified"),
+        "must_total": sum(1 for x in requirement_matrix if x["importance"] == "must"),
+        "must_missing": sum(
+            1 for x in requirement_matrix if x["importance"] == "must" and x["status"] == "missing"
+        ),
+    }
+    tool_matrix = [
+        {
+            "name": tool,
+            "status": {
+                "hit": "matched",
+                "soft_hit": "partial",
+                "missing": "missing",
+            }.get(per_tool_should.get(tool, "unverified"), "unverified"),
+        }
+        for tool in tool_should_examples
+    ]
+    tool_counts = {
+        "total": len(tool_matrix),
+        "matched": sum(1 for x in tool_matrix if x["status"] == "matched"),
+        "partial": sum(1 for x in tool_matrix if x["status"] == "partial"),
+        "missing": sum(1 for x in tool_matrix if x["status"] == "missing"),
+    }
+
     debug = ScoreBreakdown(
         per_domain=per_domain,
         per_tool_must=per_tool_must,  # kept for schema stability; unused under bonus-only policy
@@ -2608,6 +2754,10 @@ def score_ir_v3(
             "other_domains": _dedupe(other_domains),
             "required_domains_unverified": _dedupe(unverified_domains),
             "display_domain_evidence_tags": display_domain_evidence,
+            "requirement_matrix": requirement_matrix,
+            "requirement_counts": requirement_counts,
+            "tool_matrix": tool_matrix,
+            "tool_counts": tool_counts,
             "diagnostics": {
                 "scoring_domains_empty_reason": "no_scored_domains_after_evidence_filter" if signal_insufficient else "",
                 "unverified_domains_count": len(_dedupe(unverified_domains)),
@@ -2805,6 +2955,10 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     constraints = (result.debug_breakdown.constraints if result.debug_breakdown else {})
     signal_insufficient = bool(constraints.get("signal_insufficient")) if isinstance(constraints, dict) else False
+    requirement_matrix = constraints.get("requirement_matrix", []) if isinstance(constraints, dict) else []
+    requirement_counts = constraints.get("requirement_counts", {}) if isinstance(constraints, dict) else {}
+    tool_matrix = constraints.get("tool_matrix", []) if isinstance(constraints, dict) else []
+    tool_counts = constraints.get("tool_counts", {}) if isinstance(constraints, dict) else {}
 
     if signal_insufficient:
         decision_reason = "insufficient_signal"
@@ -3083,9 +3237,29 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "1.2"},
+        "contract": {"name": "kairos_v3_public", "version": "1.3"},
         "decision": decision,
         "score": score,
+        "analysis_quality": {
+            "status": "degraded" if signal_insufficient else "complete",
+            "score_reliable": not signal_insufficient,
+            "requirements_extracted": len(requirement_matrix) if isinstance(requirement_matrix, list) else 0,
+        },
+        "requirements": {
+            "counts": requirement_counts if isinstance(requirement_counts, dict) else {},
+            "items": requirement_matrix if isinstance(requirement_matrix, list) else [],
+            "status_meaning": {
+                "matched": "Resume evidence passed the deterministic matching threshold.",
+                "partial": "Related evidence exists, but it is not strong or specific enough.",
+                "missing": "No supporting resume evidence was found.",
+                "unverified": "The JD requirement could not be verified reliably.",
+            },
+        },
+        "tools": {
+            "counts": tool_counts if isinstance(tool_counts, dict) else {},
+            "items": tool_matrix if isinstance(tool_matrix, list) else [],
+            "note": "Explicit JD tools are ATS-relevant evidence, but are bonus-only in Kairos scoring.",
+        },
         "missing": missing_block,
         "required_skills": display_required_domains,
         "required_domains": display_required_domains,

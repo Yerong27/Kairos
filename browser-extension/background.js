@@ -124,6 +124,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: "Notion auth required" });
       return;
     }
+    chrome.runtime.sendMessage({
+      type: "EXTRACTION_READY",
+      data: {
+        ...(msg.extraction_meta || {}),
+        title: msg.title || "",
+        company: msg.company || "",
+        location: msg.location || "",
+      },
+    });
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
     fetch(`${DEFAULT_API_BASE}/analyze_and_save`, {
       method: "POST",
@@ -132,7 +141,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       body: JSON.stringify({
         url: msg.url || "",
         title: msg.title || "",
+        company: msg.company || "",
+        location: msg.location || "",
         page_text: msg.page_text || "",
+        extraction_meta: msg.extraction_meta || {},
         use_v3: true,
         output_language: "en",
       }),

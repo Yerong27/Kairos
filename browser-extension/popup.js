@@ -172,6 +172,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     refreshStatus();
     return;
   }
+  if (msg && msg.type === "EXTRACTION_READY") {
+    const meta = msg.data || {};
+    const count = Number(meta.description_chars || meta.sent_chars || 0).toLocaleString();
+    const source = String(meta.source || "page").replaceAll("_", " ");
+    const role = [meta.title, meta.company, meta.location].filter(Boolean).join(" · ");
+    analyzeMsg.textContent = `Extracted ${count} JD characters via ${source} (${meta.quality || "unknown"})${role ? ` — ${role}` : ""}. Analyzing...`;
+    return;
+  }
   if (msg && msg.type === "ANALYSIS_FINISHED") {
     if (msg.ok) {
       analyzeMsg.textContent = msg.data && msg.data.notion_url
