@@ -58,6 +58,20 @@ class ToolEvidence(BaseModel):
         default=None,
         validation_alias=AliasChoices("jd_evidence_quote", "evidence_quote"),
     )
+    jd_evidence_ids: List[str] = Field(
+        default_factory=list,
+        description="Backend-owned JD passage IDs that literally contain this keyword",
+    )
+    keyword_type: Literal[
+        "tool",
+        "platform",
+        "language",
+        "method",
+        "credential",
+        "standard",
+        "domain_term",
+        "other",
+    ] = "other"
 
     # Internal / Optional
     cost: Optional[str] = None
@@ -164,6 +178,10 @@ class AnalyzeIRv3(BaseModel):
     )
 
     domain_requirements: List[DomainRequirement] = Field(default_factory=list, description="List of extracted domain requirements")
+    jd_keywords: List[ToolEvidence] = Field(
+        default_factory=list,
+        description="Evidence-grounded explicit JD keywords for ATS review",
+    )
     tools_in_jd: List[str] = Field(default_factory=list, description="Tools explicitly mentioned in the JD")
 
     # New Phase 2 Field

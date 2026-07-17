@@ -582,9 +582,23 @@ def _render_requirement_matrix_to_notion(public_contract: Dict[str, Any], resp: 
         ),
     ]
 
-    status_icon = {"matched": "✅", "partial": "🟡", "missing": "❌", "unverified": "❓"}
+    status_icon = {
+        "matched": "✅",
+        "partial": "🟡",
+        "missing": "❌",
+        "confirmed": "✅",
+        "needs_confirmation": "📋",
+        "unverified": "❓",
+    }
     importance_order = {"must": 0, "should": 1, "nice_to_have": 2, "nice": 2, "unknown": 3}
-    status_order = {"missing": 0, "partial": 1, "matched": 2, "unverified": 3}
+    status_order = {
+        "missing": 0,
+        "partial": 1,
+        "needs_confirmation": 2,
+        "matched": 3,
+        "confirmed": 3,
+        "unverified": 4,
+    }
     ordered = sorted(
         items,
         key=lambda x: (
@@ -696,6 +710,8 @@ def _render_requirement_summary_to_notion(public_contract: Dict[str, Any]) -> Li
         "missing": [],
         "partial": [],
         "matched": [],
+        "confirmed": [],
+        "needs_confirmation": [],
         "unverified": [],
     }
     for item in items[:40]:
@@ -712,6 +728,8 @@ def _render_requirement_summary_to_notion(public_contract: Dict[str, Any]) -> Li
     matched = len(groups["matched"])
     partial = len(groups["partial"])
     missing = len(groups["missing"])
+    needs_confirmation = len(groups["needs_confirmation"])
+    confirmed = len(groups["confirmed"])
     total = sum(len(values) for values in groups.values())
     blocks: List[dict] = [
         _notion_heading("🎯 JD Requirements Match", level=2),
@@ -722,6 +740,12 @@ def _render_requirement_summary_to_notion(public_contract: Dict[str, Any]) -> Li
                 "icon": {"emoji": "✅" if missing == 0 else "⚠️"},
                 "rich_text": _notion_rich_text(
                     f"{matched} matched • {partial} partial • {missing} missing • {total} total"
+                    + (
+                        f" • {needs_confirmation} to confirm"
+                        if needs_confirmation
+                        else ""
+                    )
+                    + (f" • {confirmed} eligibility confirmed" if confirmed else "")
                 ),
             },
         },
@@ -730,6 +754,8 @@ def _render_requirement_summary_to_notion(public_contract: Dict[str, Any]) -> Li
         ("missing", "❌ Missing"),
         ("partial", "🟡 Partial"),
         ("matched", "✅ Matched"),
+        ("confirmed", "✅ Eligibility confirmed"),
+        ("needs_confirmation", "📋 Eligibility / Needs confirmation"),
         ("unverified", "❓ Could not verify"),
     ):
         values = _dedupe_keep_order(groups[status])

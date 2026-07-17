@@ -1201,6 +1201,9 @@ GLOBAL RULES:
      supported, use `partial`.
    - Do not infer a specialized environment, regulated context, scale, or
      responsibility merely from an adjacent industry or broad job title.
+   - For `work_condition` items (work rights, location, attendance, travel,
+     schedule, screening), use `matched` only with direct resume evidence.
+     Otherwise use `unknown`; do not infer eligibility from nearby employment.
 
 5) SHOULD APPLY:
    - Make the same holistic recommendation a strong career adviser would make.
@@ -1231,7 +1234,19 @@ GLOBAL RULES:
    - Resume support is represented ONLY by `resume_evidence_ids`.
    - Never use a JD passage ID as a resume evidence ID or vice versa.
 
-8) SENIORITY RUBRIC (Apply Universally):
+8) EXPLICIT JD KEYWORDS:
+   - Return the complete, de-duplicated set of short ATS-relevant terms that
+     are literally present in the cited job passage: named tools, platforms,
+     languages, methods, credentials, standards, and distinctive domain terms.
+   - Every keyword MUST cite exactly one valid `jd_evidence_id`, and its `name`
+     MUST occur literally in that cited passage (case-insensitive).
+   - Do not return generic prose, sentence fragments, responsibilities, soft
+     skills, section headings, or inferred synonyms.
+   - Keep meaningful multi-word names intact. Do not split an acronym from its
+     full form when both refer to the same concept; prefer the form used most
+     clearly in the JD.
+
+9) SENIORITY RUBRIC (Apply Universally):
    Use these BEHAVIORAL markers to determine `job_seniority_signal`, regardless of tech stack:
    - **MID-LEVEL**: Focus on **Execution** & **Implementation**.
      Keywords: "Implement", "Support", "Maintain", "Collaborate". Scope: Tasks / Features.
@@ -1241,7 +1256,7 @@ GLOBAL RULES:
      Keywords: "Set direction", "Mentor", "Cross-functional alignment", "Drive standards", "Stakeholder management". Scope: Team / Organization.
    - **NOTE**: Many JDs don't put "Lead" in the title but describe Lead-level influence. Trust the **responsibilities** over the title.
 
-9) OWNERSHIP & SCOPE (Critical for Precision):
+10) OWNERSHIP & SCOPE (Critical for Precision):
    Extract these signals explicitly (Integer Levels 0-3):
    - **ownership.level_val**: 0=None, 1=Task Owner (Can do work), 2=Result Owner (Accountable), 3=System/End-to-End Owner.
    - **scope.level_val**: 0=Unknown, 1=Self only, 2=Team Impact, 3=Multi-Team/Org Impact.
@@ -1280,6 +1295,14 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
           "importance": "must|should|nice_to_have"
         }}
       ]
+    }}
+  ],
+  "jd_keywords": [
+    {{
+      "tool": "literal keyword from the cited passage",
+      "keyword_type": "tool|platform|language|method|credential|standard|domain_term|other",
+      "importance": "must|should|nice_to_have",
+      "jd_evidence_ids": ["exactly one id from job_passages"]
     }}
   ],
   "ownership_and_scope": {{
@@ -1377,6 +1400,30 @@ OUTPUT LANGUAGE: {output_language}
                 "Gemini omitted a valid JD passage ID for: "
                 + ", ".join(invalid_jd_evidence[:5])
             )
+        grounded_keywords: List[ToolEvidence] = []
+        seen_keyword_names = set()
+        for keyword in parsed_ir.jd_keywords:
+            name = _normalize_whitespace(str(keyword.name or ""))
+            cited_ids = [
+                str(value).strip()
+                for value in (keyword.jd_evidence_ids or [])
+                if str(value).strip() in jd_passage_map
+            ]
+            if not name or not cited_ids:
+                continue
+            evidence_id = cited_ids[0]
+            passage = jd_passage_map[evidence_id]
+            if name.casefold() not in passage.casefold():
+                continue
+            key = name.casefold()
+            if key in seen_keyword_names:
+                continue
+            seen_keyword_names.add(key)
+            keyword.name = name
+            keyword.jd_evidence_ids = [evidence_id]
+            keyword.evidence_quote = passage
+            grounded_keywords.append(keyword)
+        parsed_ir.jd_keywords = grounded_keywords[:60]
         valid_candidate_ids = {
             item["evidence_id"]
             for item in candidate_profile_summary["evidence_claims"]
@@ -1391,7 +1438,11 @@ OUTPUT LANGUAGE: {output_language}
                     for value in (requirement.resume_evidence_ids or [])
                     if value in valid_candidate_ids
                 }
-                if status == "unknown" or (
+                allows_confirmation = (
+                    str(requirement.requirement_type or "") == "work_condition"
+                    and status == "unknown"
+                )
+                if (status == "unknown" and not allows_confirmation) or (
                     status in {"matched", "partial"} and not cited
                 ):
                     invalid_semantic_items.append(requirement.name)
@@ -1713,8 +1764,10 @@ def _merge_examples_keep_strongest(examples: List[ToolEvidence]) -> List[ToolEvi
         if k not in by_key:
             by_key[k] = ToolEvidence(
                 name=name,
-                importance=e.importance if e.importance in ("must", "should", "nice", "unknown") else "should",
+                importance=e.importance if e.importance in ("must", "should", "nice", "nice_to_have", "unknown") else "should",
                 evidence_quote=e.evidence_quote,
+                jd_evidence_ids=list(e.jd_evidence_ids or []),
+                keyword_type=e.keyword_type,
             )
             order.append(k)
             continue
@@ -1727,6 +1780,11 @@ def _merge_examples_keep_strongest(examples: List[ToolEvidence]) -> List[ToolEvi
             cur.evidence_quote = e.evidence_quote
         elif cur.evidence_quote and e.evidence_quote and len(e.evidence_quote) > len(cur.evidence_quote):
             cur.evidence_quote = e.evidence_quote
+        cur.jd_evidence_ids = _dedupe_keep_order(
+            list(cur.jd_evidence_ids or []) + list(e.jd_evidence_ids or [])
+        )[:3]
+        if cur.keyword_type == "other" and e.keyword_type != "other":
+            cur.keyword_type = e.keyword_type
 
         by_key[k] = cur
 
@@ -2806,8 +2864,22 @@ def analyze_v3(
     except Exception:
         pass
 
-    jd_tools = extract_tools_from_jd(page_text)
-    if jd_tools:
+    jd_keywords: List[ToolEvidence] = []
+    for item in _safe_list(raw.get("jd_keywords")):
+        try:
+            keyword = ToolEvidence.model_validate(item)
+        except Exception:
+            continue
+        if (
+            keyword.name.strip()
+            and keyword.evidence_quote
+            and keyword.name.casefold() in keyword.evidence_quote.casefold()
+            and keyword.jd_evidence_ids
+        ):
+            jd_keywords.append(keyword)
+    jd_keywords = _merge_examples_keep_strongest(jd_keywords)[:60]
+    jd_tools = [keyword.name for keyword in jd_keywords]
+    if jd_keywords:
         raw.setdefault("job", {})
         if isinstance(raw.get("job"), dict):
             raw["job"]["tools_in_jd"] = jd_tools
@@ -2821,6 +2893,7 @@ def analyze_v3(
         candidate_skills=candidate_skills,
         candidate_evidence_claims=profile.evidence_claims,
         domain_requirements=domain_requirements,
+        jd_keywords=jd_keywords,
         tools_in_jd=jd_tools,
         ownership_and_scope=ownership_and_scope,
         application_recommendation=application_recommendation,

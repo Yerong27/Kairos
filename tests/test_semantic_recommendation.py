@@ -67,7 +67,10 @@ def test_semantic_comparison_controls_transferability_and_apply_recommendation()
     assert "Strong adjacent cloud experience" in contract["decision"]["explanation"]
     assert contract["score"]["final_score"] == 60
     assert contract["score"]["final_score"] <= contract["score"]["cap"]
-    assert contract["score"]["summary"].startswith("Strong adjacent cloud experience")
+    assert "Strong adjacent cloud experience" in contract["score"]["summary"]
+    assert contract["score"]["summary"].startswith(
+        "Promising, with 1 MUST requirement(s) only partially evidenced."
+    )
     assert contract["analysis_quality"]["matcher_mode"] == "semantic_profile_comparison"
 
 
@@ -105,6 +108,93 @@ def test_semantic_yes_never_breaks_a_seniority_cap():
     assert contract["decision"]["verdict"] == "Yes"
     assert contract["score"]["seniority_gap"] == "medium"
     assert contract["score"]["final_score"] <= contract["score"]["cap"]
+
+
+def test_work_conditions_are_displayed_for_confirmation_but_not_scored():
+    claim = CandidateEvidenceClaim(
+        evidence_id="ev_sql",
+        resume_quote="Built production analytics workflows using SQL.",
+    )
+    ir = AnalyzeIRv3(
+        job_title="Analytics Engineer",
+        company="Example",
+        job_seniority_signal="mid",
+        candidate_seniority_signal="mid",
+        candidate_evidence_claims=[claim],
+        domain_requirements=[
+            DomainRequirement(
+                name="SQL analytics",
+                importance="must",
+                requirement_type="capability",
+                evidence_quote="Strong SQL analytics experience is required.",
+                evidence_level="exact",
+                evidence_status="verified",
+                match_status="matched",
+                resume_evidence_ids=["ev_sql"],
+            ),
+            DomainRequirement(
+                name="Australian work rights",
+                importance="must",
+                requirement_type="work_condition",
+                evidence_quote="Must have unrestricted Australian work rights.",
+                evidence_level="exact",
+                evidence_status="verified",
+                match_status="unknown",
+            ),
+        ],
+        application_recommendation=ApplicationRecommendation(
+            should_apply="Yes",
+            confidence="medium",
+            rationale="Strong evidence for the core role; confirm work rights separately.",
+        ),
+    )
+
+    contract = score_to_public_dict(score_ir_v3(ir))
+    items = {item["name"]: item for item in contract["requirements"]["items"]}
+
+    assert items["Australian work rights"]["status"] == "needs_confirmation"
+    assert contract["requirements"]["counts"]["must_total"] == 1
+    assert contract["requirements"]["counts"]["must_missing"] == 0
+    assert contract["requirements"]["counts"]["needs_confirmation"] == 1
+    assert contract["score"]["final_score"] >= 80
+
+
+def test_public_summary_tone_is_guarded_by_must_partial_and_seniority():
+    claim = CandidateEvidenceClaim(
+        evidence_id="ev_cloud",
+        resume_quote="Built AWS infrastructure for a portfolio project.",
+    )
+    ir = AnalyzeIRv3(
+        job_title="Senior Platform Engineer",
+        company="Example",
+        job_seniority_signal="senior",
+        candidate_seniority_signal="junior_to_mid",
+        candidate_evidence_claims=[claim],
+        domain_requirements=[
+            DomainRequirement(
+                name="Production platform ownership",
+                importance="must",
+                evidence_quote="Own production platform services end to end.",
+                evidence_level="exact",
+                evidence_status="verified",
+                match_status="partial",
+                resume_evidence_ids=["ev_cloud"],
+            )
+        ],
+        application_recommendation=ApplicationRecommendation(
+            should_apply="Maybe",
+            confidence="medium",
+            rationale="An exceptional and ideal fit for the role.",
+        ),
+    )
+
+    contract = score_to_public_dict(score_ir_v3(ir))
+    summary = contract["score"]["summary"].lower()
+
+    assert "exceptional" not in summary
+    assert "ideal" not in summary
+    assert "partially evidenced" in summary
+    assert "stretch" in summary
 
 
 def test_reversed_or_choices_collapse_to_one_requirement():
@@ -370,6 +460,77 @@ def test_gemini_jd_passage_id_is_mapped_to_backend_owned_source_text():
     assert requirement["jd_evidence_ids"] == [source["id"]]
     assert requirement["evidence_quote"] == source["text"]
     assert requirement["evidence_quote"].lower() in analyzer._normalize_whitespace(jd).lower()
+
+
+def test_gemini_keywords_require_literal_text_and_a_valid_passage_id():
+    jd = "Experience with Terraform and Azure DevOps is required."
+    passages = analyzer._build_jd_passages(jd)
+    source = next(item for item in passages if "Terraform" in item["text"])
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, _prompt, **_kwargs):
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "job_title": "Cloud Engineer",
+                        "company": "Example",
+                        "job_seniority_signal": "mid",
+                        "domain_requirements": [
+                            {
+                                "domain": "Infrastructure automation",
+                                "importance": "must",
+                                "requirement_type": "capability",
+                                "match_status": "missing",
+                                "jd_evidence_ids": [source["id"]],
+                                "resume_evidence_ids": [],
+                                "match_reason": "No supporting profile evidence.",
+                            }
+                        ],
+                        "jd_keywords": [
+                            {
+                                "tool": "Terraform",
+                                "keyword_type": "tool",
+                                "importance": "must",
+                                "jd_evidence_ids": [source["id"]],
+                            },
+                            {
+                                "tool": "Infrastructure as Code",
+                                "keyword_type": "method",
+                                "importance": "must",
+                                "jd_evidence_ids": [source["id"]],
+                            },
+                            {
+                                "tool": "sentence fragment",
+                                "keyword_type": "other",
+                                "importance": "should",
+                                "jd_evidence_ids": ["jd_invalid"],
+                            },
+                        ],
+                        "application_recommendation": {
+                            "should_apply": "Maybe",
+                            "confidence": "medium",
+                            "rationale": "The core requirement is not evidenced.",
+                        },
+                    }
+                )
+            )
+
+    with patch.object(analyzer, "_ensure_gemini_configured"), patch.object(
+        analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        result = analyzer._extract_with_gemini_v3(
+            jd,
+            title="Cloud Engineer",
+            output_language="en",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    assert [item["name"] for item in result["jd_keywords"]] == ["Terraform"]
+    assert result["jd_keywords"][0]["jd_evidence_ids"] == [source["id"]]
+    assert result["jd_keywords"][0]["evidence_quote"] == source["text"]
 
 
 def test_invalid_gemini_jd_passage_id_degrades_instead_of_accepting_text():

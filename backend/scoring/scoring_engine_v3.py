@@ -464,6 +464,36 @@ def _get_explicit_jd_tools(job_ir: Any) -> List[str]:
     return out
 
 
+def _get_explicit_jd_keyword_meta(job_ir: Any) -> Dict[str, Dict[str, Any]]:
+    raw_keywords = _get_field(job_ir, "jd_keywords", None)
+    if not isinstance(raw_keywords, list):
+        return {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in raw_keywords:
+        name = str(_get_field(item, "name", "") or "").strip()
+        evidence_quote = str(_get_field(item, "evidence_quote", "") or "").strip()
+        evidence_ids = [
+            str(value).strip()
+            for value in (_get_field(item, "jd_evidence_ids", []) or [])
+            if str(value).strip()
+        ]
+        if (
+            not name
+            or not evidence_quote
+            or name.casefold() not in evidence_quote.casefold()
+            or not evidence_ids
+        ):
+            continue
+        result[_norm(name)] = {
+            "name": name,
+            "keyword_type": str(_get_field(item, "keyword_type", "other") or "other"),
+            "importance": str(_get_field(item, "importance", "should") or "should"),
+            "jd_evidence_ids": evidence_ids[:3],
+            "jd_evidence": evidence_quote[:500],
+        }
+    return result
+
+
 def _is_explicit_named_example(tool_name: str, evidence_quote: Optional[str]) -> bool:
     """Avoid turning LLM-normalized capability labels into fake keywords."""
     quote = str(evidence_quote or "")
@@ -2195,19 +2225,7 @@ def score_ir_v3(
         _tool_cand_keyword_ratio,
     ) = _make_candidate_index(tool_inputs)
     explicit_jd_tools = _get_explicit_jd_tools(job_ir)
-    domain_name_tokens = {
-        token
-        for domain in (domains_raw or [])
-        for token in _tokenize(str(getattr(domain, "name", "") or ""))
-        if len(token) >= 5
-    }
-    explicit_jd_tools = [
-        tool
-        for tool in explicit_jd_tools
-        if not (
-            set(_tokenize(tool)) & domain_name_tokens
-        )
-    ]
+    explicit_jd_keyword_meta = _get_explicit_jd_keyword_meta(job_ir)
 
     gap = _seniority_gap_numeric(job_level, cand_numeric)
     bucket = _gap_bucket(gap)
@@ -2270,6 +2288,9 @@ def score_ir_v3(
     def _domain_is_other_info(x: DomainRequirement) -> bool:
         return getattr(x, "domain_id", "") == "other_info"
 
+    def _domain_needs_confirmation(x: DomainRequirement) -> bool:
+        return str(getattr(x, "requirement_type", "") or "") == "work_condition"
+
     def _domain_tag(x: DomainRequirement) -> str:
         return _domain_evidence_tag(x)
 
@@ -2289,6 +2310,7 @@ def score_ir_v3(
         d
         for d in (domains or [])
         if (not _domain_is_other_info(d))
+        and (not _domain_needs_confirmation(d))
         and _is_scored_evidence(_domain_tag(d))
     ]
 
@@ -2767,13 +2789,37 @@ def score_ir_v3(
         name = str(getattr(domain, "name", "") or "").strip()
         if not name or getattr(domain, "domain_id", "") == "other_info":
             continue
+        requirement_type = str(
+            getattr(domain, "requirement_type", "capability") or "capability"
+        )
         raw_status = per_domain.get(name, "unverified")
-        status = {
-            "hit": "matched",
-            "soft_hit": "partial",
-            "weak_hit": "partial",
-            "missing": "missing",
-        }.get(raw_status, "unverified")
+        if requirement_type == "work_condition":
+            semantic_status = str(getattr(domain, "match_status", "unknown") or "unknown")
+            has_direct_evidence = bool(getattr(domain, "resume_evidence_ids", None))
+            status = (
+                "confirmed"
+                if semantic_status == "matched" and has_direct_evidence
+                else "needs_confirmation"
+            )
+        else:
+            status = {
+                "hit": "matched",
+                "soft_hit": "partial",
+                "weak_hit": "partial",
+                "missing": "missing",
+            }.get(raw_status, "unverified")
+        matrix_evidence_ids = domain_evidence_ids.get(name, [])
+        matrix_resume_evidence = domain_resume_evidence.get(name, [])
+        if requirement_type == "work_condition":
+            matrix_evidence_ids = [
+                str(value).strip()
+                for value in (getattr(domain, "resume_evidence_ids", None) or [])
+                if str(value).strip() in claims_by_evidence_id
+            ]
+            matrix_resume_evidence = [
+                claims_by_evidence_id[value].resume_quote[:280]
+                for value in matrix_evidence_ids
+            ]
         tools: List[Dict[str, str]] = []
         for example in (getattr(domain, "examples", None) or []):
             tool_name = str(getattr(example, "name", "") or "").strip()
@@ -2797,12 +2843,14 @@ def score_ir_v3(
                 "status": status,
                 "match_confidence": domain_match_confidence.get(name, 0.0),
                 "jd_evidence": str(getattr(domain, "evidence_quote", "") or "")[:500],
-                "resume_evidence": domain_resume_evidence.get(name, []),
-                "resume_evidence_ids": domain_evidence_ids.get(name, []),
-                "match_reason": domain_match_reasons.get(name, "unverified"),
-                "requirement_type": str(
-                    getattr(domain, "requirement_type", "capability") or "capability"
+                "resume_evidence": matrix_resume_evidence,
+                "resume_evidence_ids": matrix_evidence_ids,
+                "match_reason": (
+                    str(getattr(domain, "match_reason", "") or "needs_user_confirmation")
+                    if requirement_type == "work_condition"
+                    else domain_match_reasons.get(name, "unverified")
                 ),
+                "requirement_type": requirement_type,
                 "alternatives": list(getattr(domain, "alternatives", None) or [])[:10],
                 "tools": tools[:15],
             }
@@ -2813,10 +2861,22 @@ def score_ir_v3(
         "matched": sum(1 for x in requirement_matrix if x["status"] == "matched"),
         "partial": sum(1 for x in requirement_matrix if x["status"] == "partial"),
         "missing": sum(1 for x in requirement_matrix if x["status"] == "missing"),
+        "needs_confirmation": sum(
+            1 for x in requirement_matrix if x["status"] == "needs_confirmation"
+        ),
+        "confirmed": sum(1 for x in requirement_matrix if x["status"] == "confirmed"),
         "unverified": sum(1 for x in requirement_matrix if x["status"] == "unverified"),
-        "must_total": sum(1 for x in requirement_matrix if x["importance"] == "must"),
+        "must_total": sum(
+            1
+            for x in requirement_matrix
+            if x["importance"] == "must" and x["requirement_type"] != "work_condition"
+        ),
         "must_missing": sum(
-            1 for x in requirement_matrix if x["importance"] == "must" and x["status"] == "missing"
+            1
+            for x in requirement_matrix
+            if x["importance"] == "must"
+            and x["requirement_type"] != "work_condition"
+            and x["status"] == "missing"
         ),
     }
     unsupported_requirement_matches = (
@@ -2838,6 +2898,7 @@ def score_ir_v3(
                 "soft_hit": "partial",
                 "missing": "missing",
             }.get(per_tool_should.get(tool, "unverified"), "unverified"),
+            **explicit_jd_keyword_meta.get(_norm(tool), {}),
         }
         for tool in tool_should_examples
     ]
@@ -3168,6 +3229,63 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
         if isinstance(constraints, dict)
         else {}
     )
+    must_partial_count = sum(
+        1
+        for item in requirement_matrix
+        if isinstance(item, dict)
+        and item.get("importance") == "must"
+        and item.get("requirement_type") != "work_condition"
+        and item.get("status") == "partial"
+    )
+    scored_partial_or_missing = any(
+        isinstance(item, dict)
+        and item.get("requirement_type") != "work_condition"
+        and item.get("status") in {"partial", "missing"}
+        for item in requirement_matrix
+    )
+
+    def _calibrate_recommendation_language(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return text
+        constrained = bool(
+            scored_partial_or_missing or seniority_bucket in {"medium", "cliff"}
+        )
+        if constrained:
+            text = re.sub(
+                r"\ban exceptionally (?:strong|excellent) (?:fit|match)\b",
+                "a strong match",
+                text,
+                flags=re.IGNORECASE,
+            )
+            text = re.sub(
+                r"\bexceptionally (?:strong|excellent)\b",
+                "strong",
+                text,
+                flags=re.IGNORECASE,
+            )
+            text = re.sub(r"\bexceptionally\b", "clearly", text, flags=re.IGNORECASE)
+            text = re.sub(r"\ban exceptional\b", "a strong", text, flags=re.IGNORECASE)
+            text = re.sub(r"\bexceptional\b", "strong", text, flags=re.IGNORECASE)
+            text = re.sub(r"\bideal\b", "credible", text, flags=re.IGNORECASE)
+            text = re.sub(r"\bexcellent\b", "strong", text, flags=re.IGNORECASE)
+        prefix = ""
+        if must_missing:
+            prefix = (
+                f"Worth considering, but {len(must_missing)} MUST requirement(s) "
+                "currently lack resume evidence. "
+            )
+        elif must_partial_count:
+            prefix = (
+                f"Promising, with {must_partial_count} MUST requirement(s) only "
+                "partially evidenced. "
+            )
+        if seniority_bucket in {"medium", "cliff"}:
+            prefix += (
+                "This is a stretch because the role appears above the candidate's "
+                "current seniority evidence. "
+            )
+        return (prefix + text).strip()
 
     if (
         isinstance(model_recommendation, dict)
@@ -3175,7 +3293,9 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
         and constraints.get("matcher_mode") == "semantic_profile_comparison"
     ):
         decision_reason = "semantic_candidate_assessment"
-        decision_explanation = str(model_recommendation.get("rationale") or "").strip()
+        decision_explanation = _calibrate_recommendation_language(
+            str(model_recommendation.get("rationale") or "").strip()
+        )
     elif signal_insufficient:
         decision_reason = "insufficient_signal"
         decision_explanation = "Insufficient domain requirements to score reliably."
@@ -3434,7 +3554,9 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
         and constraints.get("matcher_mode") == "semantic_profile_comparison"
         and str(model_recommendation.get("rationale") or "").strip()
     ):
-        score_summary = str(model_recommendation.get("rationale") or "").strip()
+        score_summary = _calibrate_recommendation_language(
+            str(model_recommendation.get("rationale") or "").strip()
+        )
     if seniority_bucket == "cliff":
         score_summary = f"{result.summary} (Capped primarily by seniority.)"
 
@@ -3492,6 +3614,8 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
                 "matched": "The cited resume evidence directly or equivalently satisfies the requirement.",
                 "partial": "The cited evidence is transferable or adjacent, but scope, depth, or exact tooling differs.",
                 "missing": "The stored Candidate Profile contains no relevant resume evidence.",
+                "confirmed": "The resume directly confirms this eligibility or work-condition item.",
+                "needs_confirmation": "This eligibility or work-condition item is not scored and needs the user to confirm it.",
                 "unverified": "The JD requirement could not be verified reliably.",
             },
         },
