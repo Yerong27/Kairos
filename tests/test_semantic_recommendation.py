@@ -1,3 +1,5 @@
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.ir.candidate_profile import CandidateEvidenceClaim, CandidateProfile
@@ -252,3 +254,117 @@ def test_evidence_repair_supports_a_semantic_label_not_written_verbatim():
 
     assert repaired
     assert repaired.lower() in jd.lower()
+
+
+def test_jd_passages_are_source_grounded_and_preserve_requirement_content():
+    jd = (
+        "About the role\n"
+        "• Design reliable cloud services for regulated customers.\n"
+        "• Experience with infrastructure as code and CI/CD is required.\n"
+        "• Communicate technical decisions clearly to business stakeholders."
+    )
+
+    passages = analyzer._build_jd_passages(jd)
+    normalized_jd = analyzer._normalize_whitespace(jd).lower()
+
+    assert len(passages) >= 3
+    assert len({item["id"] for item in passages}) == len(passages)
+    assert all(item["text"].lower() in normalized_jd for item in passages)
+    assert any("infrastructure as code" in item["text"].lower() for item in passages)
+    assert any("business stakeholders" in item["text"].lower() for item in passages)
+
+
+def test_gemini_jd_passage_id_is_mapped_to_backend_owned_source_text():
+    jd = (
+        "The role designs reliable cloud services. "
+        "Experience with infrastructure as code and CI/CD is required."
+    )
+    passages = analyzer._build_jd_passages(jd)
+    source = next(
+        item for item in passages if "infrastructure as code" in item["text"].lower()
+    )
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, prompt, **_kwargs):
+            assert '"id": "' + source["id"] + '"' in prompt
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "job_title": "Cloud Engineer",
+                        "company": "Example",
+                        "job_seniority_signal": "mid",
+                        "domain_requirements": [
+                            {
+                                "domain": "Infrastructure as Code and CI/CD",
+                                "importance": "must",
+                                "requirement_type": "capability",
+                                "match_status": "missing",
+                                "jd_evidence_ids": [source["id"]],
+                                "resume_evidence_ids": [],
+                                "match_reason": "No supporting profile evidence.",
+                            }
+                        ],
+                        "application_recommendation": {
+                            "should_apply": "Maybe",
+                            "confidence": "medium",
+                            "rationale": "One important requirement is not evidenced.",
+                        },
+                    }
+                )
+            )
+
+    with patch.object(analyzer, "_ensure_gemini_configured"), patch.object(
+        analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        result = analyzer._extract_with_gemini_v3(
+            jd,
+            title="Cloud Engineer",
+            output_language="en",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    requirement = result["domain_requirements"][0]
+    assert requirement["jd_evidence_ids"] == [source["id"]]
+    assert requirement["evidence_quote"] == source["text"]
+    assert requirement["evidence_quote"].lower() in analyzer._normalize_whitespace(jd).lower()
+
+
+def test_invalid_gemini_jd_passage_id_degrades_instead_of_accepting_text():
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, _prompt, **_kwargs):
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "job_title": "Cloud Engineer",
+                        "company": "Example",
+                        "job_seniority_signal": "mid",
+                        "domain_requirements": [
+                            {
+                                "domain": "Invented requirement",
+                                "importance": "must",
+                                "match_status": "missing",
+                                "jd_evidence_ids": ["jd_999"],
+                            }
+                        ],
+                    }
+                )
+            )
+
+    with patch.object(analyzer, "_ensure_gemini_configured"), patch.object(
+        analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        result = analyzer._extract_with_gemini_v3(
+            "The role requires clear stakeholder communication.",
+            title="Cloud Engineer",
+            output_language="en",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    assert result["analysis_status"] == "degraded"
+    assert "valid JD passage ID" in result["evidence_hints"]["error"]

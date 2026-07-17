@@ -407,6 +407,67 @@ def _repair_jd_evidence_quote(
     return best_quote[:900]
 
 
+def _build_jd_passages(page_text: str, *, max_passages: int = 120) -> List[Dict[str, str]]:
+    """Split a JD into stable, source-grounded passages for model citations.
+
+    Gemini cites the IDs; the backend owns the source text. Every emitted
+    passage is a contiguous substring of the whitespace-normalized JD.
+    """
+    normalized = _normalize_whitespace(page_text)
+    if not normalized:
+        return []
+
+    # Preserve bullet and sentence boundaries before whitespace normalization.
+    rough_parts = re.split(
+        r"(?:\r?\n+|[•●▪◦]\s*|(?<=[.!?;:])\s+(?=[A-Z0-9]))",
+        str(page_text or ""),
+    )
+    parts = [_normalize_whitespace(value) for value in rough_parts]
+    parts = [value for value in parts if value]
+
+    passages: List[str] = []
+    for part in parts:
+        words = list(re.finditer(r"\S+", part))
+        if len(words) <= 85:
+            passages.append(part)
+            continue
+
+        # Long LinkedIn sections are sometimes flattened into one paragraph.
+        # Split at word boundaries without rewriting any source wording.
+        start_word = 0
+        while start_word < len(words):
+            end_word = min(start_word + 65, len(words))
+            start_char = words[start_word].start()
+            end_char = words[end_word - 1].end()
+            passages.append(part[start_char:end_char])
+            start_word = end_word
+
+    # Some page extractors remove all useful boundaries. The long-part branch
+    # above still covers that case. Deduplicate repeated LinkedIn UI text.
+    unique: List[str] = []
+    seen = set()
+    normalized_lower = normalized.lower()
+    for passage in passages:
+        passage = _normalize_whitespace(passage)
+        key = passage.lower()
+        if len(passage) < 8 or key in seen:
+            continue
+        if key not in normalized_lower:
+            continue
+        seen.add(key)
+        unique.append(passage)
+        if len(unique) >= max_passages:
+            break
+
+    if not unique:
+        unique = [normalized[:4000]]
+
+    return [
+        {"id": f"jd_{index:03d}", "text": passage}
+        for index, passage in enumerate(unique, start=1)
+    ]
+
+
 def _get_domain_catalog(job_family: str):
     global _DOMAIN_CATALOG
     if _DOMAIN_CATALOG is None:
@@ -1064,6 +1125,9 @@ def _extract_with_gemini_v3(
         ],
     }
     candidate_profile_json = json.dumps(candidate_profile_summary, ensure_ascii=False)
+    jd_passages = _build_jd_passages(page_text)
+    jd_passage_map = {item["id"]: item["text"] for item in jd_passages}
+    jd_passages_json = json.dumps(jd_passages, ensure_ascii=False)
 
     prompt = f"""You are a Job Analysis Engine.
 
@@ -1078,7 +1142,7 @@ GLOBAL RULES:
    - Do not turn every noun, example, acronym, or tool into a separate
      requirement. Most JDs should produce roughly 8-20 decision-level items.
    - Combine equivalent or overlapping items from the same clause.
-   - Do not invent a requirement that lacks a verbatim evidence_quote.
+   - Do not invent a requirement that lacks a supporting job passage ID.
 
 2) IMPORTANCE HIERARCHY:
    - "must": only explicit required/essential/minimum/mandatory language.
@@ -1121,14 +1185,14 @@ GLOBAL RULES:
    - Prefer complete decision coverage over a fixed output count.
    - Include non-technical constraints such as licences, education, work rights,
      travel, schedule, language, physical conditions, or regulated experience.
-   - Keep evidence_summary to at most 20 words and evidence_quote to the shortest
-     verbatim clause that proves the requirement.
+   - Keep evidence_summary to at most 20 words.
 
 7) EVIDENCE:
    - **evidence_summary**: Summarize the requirement context (1 sentence) for human understanding.
-   - **jd_evidence_quote**: Verbatim substring copied ONLY from `job_text`.
-   - Never put a resume quote in `jd_evidence_quote`. Resume support is
-     represented ONLY by `resume_evidence_ids`.
+   - **jd_evidence_ids**: Cite 1-3 exact IDs from `job_passages` that support
+     the requirement. Never copy, paraphrase, or generate JD evidence text.
+   - Resume support is represented ONLY by `resume_evidence_ids`.
+   - Never use a JD passage ID as a resume evidence ID or vice versa.
 
 8) SENIORITY RUBRIC (Apply Universally):
    Use these BEHAVIORAL markers to determine `job_seniority_signal`, regardless of tech stack:
@@ -1146,9 +1210,9 @@ GLOBAL RULES:
    - **scope.level_val**: 0=Unknown, 1=Self only, 2=Team Impact, 3=Multi-Team/Org Impact.
    - **leadership.level_val**: 0=None, 1=Mentor/Guide, 2=Team Lead (unblock others), 3=Org Lead (Manager/Principal).
 
-<job_text>
-{page_text[:25000]}
-</job_text>
+<job_passages>
+{jd_passages_json}
+</job_passages>
 
 <candidate_profile>
 {candidate_profile_json}
@@ -1172,12 +1236,11 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
       "resume_evidence_ids": ["exact evidence_id from candidate_profile"],
       "match_reason": "one concise candidate-specific reason",
       "evidence_summary": "string",
-      "jd_evidence_quote": "verbatim substring copied from job_text only",
+      "jd_evidence_ids": ["exact id from job_passages"],
       "examples": [
         {{
           "tool": "string",
-          "importance": "must|should|nice_to_have",
-          "jd_evidence_quote": "verbatim substring copied from job_text only"
+          "importance": "must|should|nice_to_have"
         }}
       ]
     }}
@@ -1231,27 +1294,25 @@ OUTPUT LANGUAGE: {output_language}
         )
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
-        jd_text_normalized = _normalize_whitespace(page_text).lower()
         invalid_jd_evidence = []
         for requirement in parsed_ir.domain_requirements:
-            if _validate_quote(
-                str(requirement.evidence_quote or ""),
-                jd_text_normalized,
-            ):
-                continue
-            repaired_quote = _repair_jd_evidence_quote(
-                page_text=page_text,
-                requirement_name=requirement.name,
-                proposed_quote=str(requirement.evidence_quote or ""),
-                evidence_summary=str(requirement.evidence_summary or ""),
-            )
-            if repaired_quote:
-                requirement.evidence_quote = repaired_quote
-            else:
+            cited_ids = _dedupe_keep_order(
+                [
+                    str(value).strip()
+                    for value in (requirement.jd_evidence_ids or [])
+                    if str(value).strip() in jd_passage_map
+                ]
+            )[:3]
+            if not cited_ids:
                 invalid_jd_evidence.append(requirement.name)
+                continue
+            requirement.jd_evidence_ids = cited_ids
+            # Downstream deterministic logic continues to consume one exact
+            # source quote. It is supplied by the backend, never by Gemini.
+            requirement.evidence_quote = jd_passage_map[cited_ids[0]]
         if invalid_jd_evidence:
             raise ValueError(
-                "Gemini returned requirement evidence that was not copied from the JD: "
+                "Gemini omitted a valid JD passage ID for: "
                 + ", ".join(invalid_jd_evidence[:5])
             )
         valid_candidate_ids = {
@@ -1295,6 +1356,7 @@ OUTPUT LANGUAGE: {output_language}
         if isinstance(parsed_ir.raw_llm_json, dict):
             parsed_ir.raw_llm_json.setdefault("_debug_meta", {})
             parsed_ir.raw_llm_json["_debug_meta"]["job_family"] = job_family
+            parsed_ir.raw_llm_json["_debug_meta"]["jd_passage_count"] = len(jd_passages)
         # Note: adjudicate_domains now handles verification internally!
         # So we do NOT call _verify_spans here anymore.
         parsed_ir.domain_requirements = adjudicate_domains(
@@ -2442,6 +2504,13 @@ def analyze_v3(
             match_status = "unknown"
         if match_status in {"missing", "unknown"}:
             resume_evidence_ids = []
+        jd_evidence_ids = _dedupe_keep_order(
+            [
+                str(value).strip()
+                for value in _safe_list(d.get("jd_evidence_ids"))
+                if str(value).strip()
+            ]
+        )[:3]
         match_reason = _normalize_whitespace(str(d.get("match_reason") or ""))[:500] or None
 
         examples: List[ToolEvidence] = []
@@ -2531,6 +2600,7 @@ def analyze_v3(
                 requirement_type=requirement_type,
                 alternatives=alternatives,
                 match_status=match_status,
+                jd_evidence_ids=jd_evidence_ids,
                 resume_evidence_ids=resume_evidence_ids,
                 match_reason=match_reason,
                 evidence_quote=evidence_quote,
@@ -2573,6 +2643,9 @@ def analyze_v3(
         existing_choice.resume_evidence_ids = _dedupe_keep_order(
             list(existing_choice.resume_evidence_ids or []) + list(dr.resume_evidence_ids or [])
         )[:5]
+        existing_choice.jd_evidence_ids = _dedupe_keep_order(
+            list(existing_choice.jd_evidence_ids or []) + list(dr.jd_evidence_ids or [])
+        )[:3]
         if match_rank.get(dr.match_status, 0) > match_rank.get(existing_choice.match_status, 0):
             existing_choice.match_status = dr.match_status
             existing_choice.match_reason = dr.match_reason
@@ -2618,6 +2691,9 @@ def analyze_v3(
         exist.resume_evidence_ids = _dedupe_keep_order(
             list(exist.resume_evidence_ids or []) + list(dr.resume_evidence_ids or [])
         )[:5]
+        exist.jd_evidence_ids = _dedupe_keep_order(
+            list(exist.jd_evidence_ids or []) + list(dr.jd_evidence_ids or [])
+        )[:3]
         if match_rank.get(dr.match_status, 0) > match_rank.get(exist.match_status, 0):
             exist.match_status = dr.match_status
             exist.match_reason = dr.match_reason

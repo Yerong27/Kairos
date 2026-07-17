@@ -79,6 +79,7 @@ class DomainRequirement(BaseModel):
         description="Literal OR alternatives that can satisfy the same requirement",
     )
     match_status: MatchStatus = "unknown"
+    jd_evidence_ids: List[str] = Field(default_factory=list)
     resume_evidence_ids: List[str] = Field(default_factory=list)
     match_reason: Optional[str] = None
 
