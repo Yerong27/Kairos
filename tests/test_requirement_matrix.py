@@ -168,21 +168,6 @@ def test_jd_tool_extraction_deduplicates_databases_and_drops_low_signal_concepts
     assert "containers" not in tools
 
 
-def test_illustrative_terms_are_recovered_for_parent_matching_only():
-    quote = (
-        "Infrastructure technologies such as YAML, JSON, Ansible, "
-        "CloudFormation or Terraform"
-    )
-
-    assert analyzer._extract_illustrative_terms(quote) == [
-        "YAML",
-        "JSON",
-        "Ansible",
-        "CloudFormation",
-        "Terraform",
-    ]
-
-
 def test_grounded_requirement_not_in_catalog_is_preserved_and_verified():
     requirement = DomainRequirement(
         name="Operating System Management",
@@ -310,7 +295,7 @@ def test_public_contract_contains_every_requirement_with_evidence_status():
     assert [tool["name"] for tool in by_name["Observability"]["tools"]] == []
 
 
-def test_illustrative_examples_do_not_become_individual_keyword_gaps():
+def test_illustrative_examples_are_ats_keywords_not_individual_requirements():
     ir = AnalyzeIRv3(
         job_title="Operations Analyst",
         company="Example",
@@ -336,7 +321,8 @@ def test_illustrative_examples_do_not_become_individual_keyword_gaps():
 
     contract = score_to_public_dict(score_ir_v3(ir))
 
-    assert all(item["name"] != "Excel" for item in contract["tools"]["items"])
+    assert any(item["name"] == "Excel" for item in contract["tools"]["items"])
+    assert all(item["name"] != "Excel" for item in contract["requirements"]["items"])
     assert contract["requirements"]["items"][0]["name"] == "Reporting Automation"
 
 
@@ -391,6 +377,6 @@ def test_notion_uses_user_facing_summary_without_evidence_matrix():
     assert "Extracted Tools (JD)" not in serialized
     assert "Layered Breakdown" not in serialized
     assert "📈 Seniority" in serialized
-    assert "Your level: junior" in serialized
+    assert "Your level: Junior" in serialized
     assert "none=92" not in serialized
     assert "Notes" not in serialized

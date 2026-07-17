@@ -273,6 +273,28 @@ def _extract_domains_from_raw(raw: Dict[str, Any]) -> List[DomainRequirement]:
             DomainRequirement(
                 name=str(item.get("name") or ""),
                 importance=cast(Any, item.get("importance") or "should"),
+                requirement_type=cast(Any, item.get("requirement_type") or "capability"),
+                alternatives=[
+                    str(value)
+                    for value in _safe_list(item.get("alternatives"))
+                    if str(value).strip()
+                ],
+                match_status=cast(Any, item.get("match_status") or "unknown"),
+                jd_evidence_ids=[
+                    str(value)
+                    for value in _safe_list(item.get("jd_evidence_ids"))
+                    if str(value).strip()
+                ],
+                resume_evidence_ids=[
+                    str(value)
+                    for value in _safe_list(item.get("resume_evidence_ids"))
+                    if str(value).strip()
+                ],
+                match_reason=(
+                    str(item.get("match_reason"))
+                    if item.get("match_reason") is not None
+                    else None
+                ),
                 evidence_quote=item.get("evidence_quote"),
                 evidence_summary=item.get("evidence_summary"),
                 facet=cast(Any, item.get("facet") or "unknown"),
@@ -442,28 +464,15 @@ def _get_explicit_jd_tools(job_ir: Any) -> List[str]:
     return out
 
 
-def _is_illustrative_example(tool_name: str, evidence_quote: Optional[str]) -> bool:
-    """True when a term appears only after an example marker in its JD quote."""
-    quote = str(evidence_quote or "")
-    if not quote.strip() or not tool_name.strip():
-        return False
-    low = quote.lower()
-    marker = re.search(r"\b(such as|including|e\.g\.|for example|like)\b", low)
-    if not marker:
-        return False
-    tool_pos = low.find(tool_name.lower())
-    return tool_pos < 0 or marker.start() < tool_pos
-
-
 def _is_explicit_named_example(tool_name: str, evidence_quote: Optional[str]) -> bool:
     """Avoid turning LLM-normalized capability labels into fake keywords."""
     quote = str(evidence_quote or "")
     name = str(tool_name or "").strip()
     if not quote or not name:
         return False
-    # Exact case-sensitive presence is a useful industry-neutral signal for
-    # named software, credentials, standards, acronyms, and proper nouns.
-    return name in quote
+    # Literal presence in the backend-owned parent passage is an
+    # industry-neutral signal for software, credentials, standards and terms.
+    return name.lower() in quote.lower()
 
 def _get_job_level(job_ir: Any) -> SeniorityLabel:
     lvl = _get_field(job_ir, "job_seniority_signal", None)
@@ -2185,6 +2194,19 @@ def score_ir_v3(
         _tool_cand_keyword_ratio,
     ) = _make_candidate_index(tool_inputs)
     explicit_jd_tools = _get_explicit_jd_tools(job_ir)
+    domain_name_tokens = {
+        token
+        for domain in (domains_raw or [])
+        for token in _tokenize(str(getattr(domain, "name", "") or ""))
+        if len(token) >= 5
+    }
+    explicit_jd_tools = [
+        tool
+        for tool in explicit_jd_tools
+        if not (
+            set(_tokenize(tool)) & domain_name_tokens
+        )
+    ]
 
     gap = _seniority_gap_numeric(job_level, cand_numeric)
     bucket = _gap_bucket(gap)
@@ -2456,8 +2478,6 @@ def score_ir_v3(
         for ex in (d.examples or []):
             ex_name_raw = getattr(ex, "name", "") or ""
             if not ex_name_raw.strip():
-                continue
-            if _is_illustrative_example(ex_name_raw, getattr(ex, "evidence_quote", None)):
                 continue
             if not _is_explicit_named_example(ex_name_raw, getattr(ex, "evidence_quote", None)):
                 continue
@@ -2836,6 +2856,11 @@ def score_ir_v3(
         constraints={
             "job_level": job_level,
             "cand_level": cand_level,
+            "candidate_display_level": (
+                "junior_to_mid"
+                if cand_reason == "experience_band_junior_to_mid"
+                else cand_level
+            ),
             "cand_numeric_level": cand_numeric,
             "cand_level_reason": cand_reason,
             "candidate_title_signal": cand_title_signal,
@@ -3327,7 +3352,11 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
                 "cap_applied": cap_applied,
                 "blocked_by_seniority": blocked_by_seniority,
                 "job_level": (constraints.get("job_level") if result.debug_breakdown else None),
-                "candidate_level": (constraints.get("cand_level") if result.debug_breakdown else None),
+                "candidate_level": (
+                    constraints.get("candidate_display_level", constraints.get("cand_level"))
+                    if result.debug_breakdown
+                    else None
+                ),
                 "candidate_numeric_level": (constraints.get("cand_numeric_level") if result.debug_breakdown else None),
                 "gap": (constraints.get("gap") if result.debug_breakdown else None),
             },
@@ -3435,7 +3464,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "2.3"},
+        "contract": {"name": "kairos_v3_public", "version": "2.4"},
         "decision": decision,
         "score": score,
         "analysis_quality": {

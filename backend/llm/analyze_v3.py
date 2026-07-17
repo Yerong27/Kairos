@@ -275,23 +275,6 @@ def extract_tools_from_jd(page_text: str) -> List[str]:
     return out
 
 
-def _extract_illustrative_terms(evidence_quote: str) -> List[str]:
-    """Extract example terms while keeping them attached to the parent requirement."""
-    quote = str(evidence_quote or "").strip()
-    marker = re.search(r"\b(such as|including|e\.g\.|for example)\b", quote, re.IGNORECASE)
-    if not marker:
-        return []
-    tail = quote[marker.end() :].strip()
-    if ")" in tail:
-        tail = tail.split(")", 1)[0]
-    tail = tail.strip(" .:;()[]")
-    values: List[str] = []
-    for part in re.split(r"[,;]|\s+\bor\b\s+|\s+\band\b\s+", tail, flags=re.IGNORECASE):
-        for normalized in _normalize_tool_token(part.strip(" .:;()[]")):
-            values.append(normalized)
-    return _dedupe_keep_order(values)[:16]
-
-
 _EVIDENCE_REPAIR_STOPWORDS = {
     "a",
     "an",
@@ -640,7 +623,13 @@ _STOP_ANCHOR_TOKENS = {
     "requirements",
 }
 
-_IMPORTANCE_RANK: Dict[str, int] = {"unknown": 0, "nice": 1, "should": 2, "must": 3}
+_IMPORTANCE_RANK: Dict[str, int] = {
+    "unknown": 0,
+    "nice": 1,
+    "nice_to_have": 1,
+    "should": 2,
+    "must": 3,
+}
 
 
 # =============================
@@ -760,7 +749,9 @@ def _validate_quote(quote: str, page_text_flat_lower: str) -> bool:
         return False
 
     q_norm = _normalize_whitespace(quote)
-    if len(q_norm.split()) > 22:
+    # JD passage IDs may point to a complete sentence or compact paragraph.
+    # The backend owns that source text, so length is not a trust signal.
+    if len(q_norm.split()) > 90:
         return False
     if len(q_norm) < 2:
         return False
@@ -868,20 +859,22 @@ def _norm_importance(x: Any) -> Importance:
         if sep in s:
             tail = s.split(sep)[-1].strip()
             tail = _strip_wrapping_quotes(tail)
-            if tail in ("must", "should", "nice", "unknown"):
+            if tail in ("must", "should", "nice", "nice_to_have", "unknown"):
                 return tail  # type: ignore
 
-    if s in ("must", "should", "nice", "unknown"):
+    if s in ("must", "should", "nice", "nice_to_have", "unknown"):
         return s  # type: ignore
 
     if s in ("required", "essential", "core", "mandatory"):
         return "must"
-    if s in ("preferred", "bonus", "nice to have", "plus", "desired", "advantage", "desirable"):
-        return "should"
+    if s in ("preferred", "bonus", "nice to have", "nice-to-have", "plus", "desired", "advantage", "desirable"):
+        return "nice_to_have"
 
     if "must" in s or "mandatory" in s or "required" in s or "essential" in s:
         return "must"
-    if "should" in s or "preferred" in s or "bonus" in s or "desirable" in s:
+    if "preferred" in s or "bonus" in s or "desirable" in s or "nice to have" in s:
+        return "nice_to_have"
+    if "should" in s:
         return "should"
 
     return "unknown"
@@ -1582,57 +1575,28 @@ def _derive_domain_importance_from_context(
     facet: DomainFacet,
     section_kind: str,
 ) -> Importance:
-    """
-    Enforce strict rules to reduce MUST jitter (方案B 的前置稳定性)：
-    - Responsibilities 默认 SHOULD，除非显式 required/must
-    - Preference 语言 => SHOULD
-    - MUST 仅在 Requirements 段或 quote/context 含强制词
+    """Preserve the model's section-aware classification with safe overrides.
+
+    Gemini sees the complete ordered JD passages. This function must not
+    independently reclassify an evidenced requirement from a small local
+    window; it only enforces unambiguous preference/mandatory wording.
     """
     base = _norm_importance(raw_imp)
-    if base in ("unknown", "nice"):
+    if base == "unknown":
         base = "should"
 
     q = _normalize_whitespace(evidence_quote or "").lower()
-    ctx = _normalize_whitespace(tight_context_lower or "").lower()
-    name_l = _normalize_whitespace(domain_name or "").lower()
-
     quote_has_preference = bool(RE_PREFERENCE.search(q))
     quote_has_strict = bool(RE_STRICT_QUOTE.search(q) or RE_STRICT_STRONG.search(q))
-    ctx_has_strict = bool(RE_STRICT_QUOTE.search(ctx) or RE_STRICT_STRONG.search(ctx))
-    ctx_has_example = bool(RE_EXAMPLE.search(ctx))
+    # Preference language cannot become a hard requirement.
+    if quote_has_preference:
+        return "nice_to_have"
 
-    # Preference always forces SHOULD
-    if quote_has_preference or bool(RE_PREFERENCE.search(ctx)):
-        return "should"
-
-    # Responsibilities default SHOULD unless explicitly required
-    if section_kind == "responsibilities" and not (quote_has_strict or ctx_has_strict):
-        return "should"
-
-    # Explicit strict language forces MUST
+    # Explicit mandatory language remains authoritative.
     if quote_has_strict:
         return "must"
 
-    # Requirements section:
-    if section_kind == "requirements":
-        # If it's clearly example framing and lacks strict markers, keep SHOULD.
-        if ctx_has_example and not ctx_has_strict:
-            return "should"
-        # The comparison model sees the full section structure. Do not promote
-        # an item it classified as SHOULD merely because a noisy extracted
-        # context window resembles a requirements section.
-        return "must" if base == "must" else "should"
-
-    # If LLM said must but we don't see requirement section nor strict language => do NOT allow must
-    if base == "must":
-        if not ctx_has_strict:
-            return "should"
-        return "must"
-
-    if RE_PREFER_SHOULD_DOMAINS.search(name_l) or RE_PREFER_SHOULD_DOMAINS.search(q):
-        return "should"
-
-    return "should"
+    return base
 
 
 def _is_explicit_tool_must(ex_quote: str, ex_ctx: str, tool_name: str, *, section_kind: str) -> bool:
@@ -2527,6 +2491,12 @@ def analyze_v3(
             ex_quote = _normalize_whitespace(str(ex.get("evidence_quote") or ""))
             ex_raw_imp = ex.get("importance")
 
+            # Examples cite their parent requirement passage. A separate model-
+            # generated quote is unnecessary when the literal name is present
+            # in the backend-owned JD source.
+            if not ex_quote and tname.lower() in evidence_quote.lower():
+                ex_quote = evidence_quote
+
             ex_imp = _norm_importance(ex_raw_imp)
             if ex_imp in ("unknown", "nice"):
                 ex_imp = "should"
@@ -2554,19 +2524,6 @@ def analyze_v3(
                     ex_imp = "should"
 
             examples.append(ToolEvidence(name=tname, importance=ex_imp, evidence_quote=ex_quote or None))
-
-        # Gemini may return only some members of an illustrative list. Recover
-        # the remaining literal terms deterministically, but keep them as
-        # examples of the parent requirement rather than standalone gaps.
-        for term in _extract_illustrative_terms(evidence_quote):
-            if _validate_soft_anchor(term, page_text_flat_lower):
-                examples.append(
-                    ToolEvidence(
-                        name=term,
-                        importance="should",
-                        evidence_quote=evidence_quote or None,
-                    )
-                )
 
         ex_final = _merge_examples_keep_strongest(examples)
         if len(ex_final) > 14:
@@ -2620,6 +2577,7 @@ def analyze_v3(
     # one hiring requirement, not two independent matches.
     choice_groups: Dict[Tuple[str, ...], DomainRequirement] = {}
     collapsed_requirements: List[DomainRequirement] = []
+    normalization_merge_count = 0
     match_rank = {"unknown": 0, "missing": 1, "partial": 2, "matched": 3}
     for dr in domain_requirements:
         choice_labels = _dedupe_keep_order([dr.name] + list(dr.alternatives or []))
@@ -2632,6 +2590,7 @@ def analyze_v3(
             choice_groups[choice_key] = dr
             collapsed_requirements.append(dr)
             continue
+        normalization_merge_count += 1
         display_choices = _dedupe_keep_order(
             [existing_choice.name]
             + list(existing_choice.alternatives or [])
@@ -2662,6 +2621,7 @@ def analyze_v3(
         if k not in dom_map:
             dom_map[k] = dr
             continue
+        normalization_merge_count += 1
 
         exist = dom_map[k]
 
@@ -2719,10 +2679,13 @@ def analyze_v3(
     )
     raw_requirement_count = len(raw_domains)
     verified_requirement_count = len(domain_requirements)
-    minimum_retained = max(1, (raw_requirement_count * 3 + 3) // 4)
+    expected_requirement_count = max(
+        0,
+        raw_requirement_count - normalization_merge_count,
+    )
     normalization_incomplete = bool(
-        raw_requirement_count
-        and verified_requirement_count < minimum_retained
+        expected_requirement_count
+        and verified_requirement_count < expected_requirement_count
     )
     evidence_hints = job.get("evidence_hints") or raw.get("evidence_hints") or {}
     if not isinstance(evidence_hints, dict):
@@ -2764,6 +2727,8 @@ def analyze_v3(
         raw["_debug_meta"]["anchors_per_domain"] = {d.name: (d.anchors or []) for d in domain_requirements}
         raw["_debug_meta"]["raw_requirement_count"] = raw_requirement_count
         raw["_debug_meta"]["verified_requirement_count"] = verified_requirement_count
+        raw["_debug_meta"]["normalization_merge_count"] = normalization_merge_count
+        raw["_debug_meta"]["expected_requirement_count"] = expected_requirement_count
         raw["_debug_meta"]["requirement_retention_ratio"] = round(
             verified_requirement_count / float(raw_requirement_count),
             3,

@@ -519,8 +519,8 @@ def _render_decision_constraints_to_notion(public_contract: Dict[str, Any], resp
     except Exception:
         pass
 
-    jl = _safe_str(job_level, "").strip()
-    cl = _safe_str(cand_level, "").strip()
+    jl = _safe_str(job_level, "").strip().replace("_", " ").title()
+    cl = _safe_str(cand_level, "").strip().replace("_", " ").title()
     gl = _safe_str(gap_levels, "").strip()
     bucket = _safe_str(getattr(resp, "seniority_gap", ""), "").strip().lower()
     if not (jl or cl or gl or bucket):

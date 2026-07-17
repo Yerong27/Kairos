@@ -2,7 +2,7 @@ import time
 
 from backend.ir.schema_v3 import AnalyzeIRv3
 from backend.llm.analyze_v3 import _derive_candidate_level_from_experience
-from backend.scoring.scoring_engine_v3 import score_ir_v3
+from backend.scoring.scoring_engine_v3 import score_ir_v3, score_to_public_dict
 
 
 def _month_name(month: int) -> str:
@@ -87,3 +87,6 @@ def test_junior_to_mid_band_uses_numeric_half_step():
     assert constraints["cand_level"] == "junior"
     assert constraints["cand_numeric_level"] == 1.5
     assert constraints["cand_level_reason"] == "experience_band_junior_to_mid"
+    contract = score_to_public_dict(result)
+    seniority_layer = next(layer for layer in contract["layers"] if layer["id"] == "seniority")
+    assert seniority_layer["meta"]["candidate_level"] == "junior_to_mid"

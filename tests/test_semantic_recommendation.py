@@ -119,6 +119,7 @@ def test_reversed_or_choices_collapse_to_one_requirement():
         )
 
     assert len(result.domain_requirements) == 1
+    assert result.analysis_status == "success"
     assert "CDK" in result.domain_requirements[0].name
     assert "CloudFormation" in result.domain_requirements[0].name
 
@@ -368,3 +369,126 @@ def test_invalid_gemini_jd_passage_id_degrades_instead_of_accepting_text():
 
     assert result["analysis_status"] == "degraded"
     assert "valid JD passage ID" in result["evidence_hints"]["error"]
+
+
+def test_complete_cross_layer_requirement_matrix_preserves_detail_and_keywords():
+    clauses = [
+        (
+            "AWS Cloud-Native Services",
+            "Strong hands-on experience supporting production workloads across AWS cloud-native services, including VPC, IAM, EC2, S3, Lambda, RDS, CloudWatch, and KMS in complex enterprise environments.",
+            "must",
+            "matched",
+            ["VPC", "IAM", "EC2", "S3", "Lambda", "RDS", "CloudWatch", "KMS"],
+        ),
+        (
+            "AI and Generative AI Services",
+            "Exposure to AI and generative AI services such as Amazon Bedrock and Amazon SageMaker is desirable.",
+            "nice_to_have",
+            "matched",
+            ["Amazon Bedrock", "Amazon SageMaker"],
+        ),
+        (
+            "Infrastructure as Code and CI/CD",
+            "Proficiency with Infrastructure as Code and CI/CD practices using Terraform, Jenkins, and GitHub Actions.",
+            "must",
+            "partial",
+            ["Terraform", "Jenkins", "GitHub Actions"],
+        ),
+        (
+            "Cloud Security and Operations",
+            "Strong understanding of cloud security, network security, secrets management, encryption, monitoring, logging, and production readiness.",
+            "must",
+            "matched",
+            [],
+        ),
+        (
+            "Containerisation and Microservices",
+            "Experience with containerisation and microservices patterns using Docker and Amazon ECS.",
+            "must",
+            "partial",
+            ["Docker", "Amazon ECS"],
+        ),
+        (
+            "Customer Discovery",
+            "Analyse customer requirements, ask discovery questions, and translate business needs into practical technical solutions.",
+            "should",
+            "matched",
+            [],
+        ),
+        (
+            "Stakeholder Communication",
+            "Communicate clearly with technical and business stakeholders in a fast-paced regulated environment.",
+            "should",
+            "matched",
+            [],
+        ),
+        (
+            "AWS Certifications",
+            "AWS Solutions Architect or DevOps Engineer certification is desirable.",
+            "nice_to_have",
+            "matched",
+            ["AWS Solutions Architect", "DevOps Engineer"],
+        ),
+    ]
+    page_text = "\n".join(quote for _name, quote, _importance, _status, _tools in clauses)
+    raw = {
+        "job_title": "Cloud DevOps Engineer",
+        "company": "Example Bank",
+        "job_seniority_signal": "mid",
+        "domain_requirements": [
+            {
+                "name": name,
+                "importance": importance,
+                "requirement_type": "capability",
+                "evidence_quote": quote,
+                "match_status": status,
+                "resume_evidence_ids": ["ev_cloud"],
+                "match_reason": "Grounded transferable candidate evidence.",
+                "examples": [
+                    {"name": tool, "importance": "should"}
+                    for tool in tools
+                ],
+            }
+            for name, quote, importance, status, tools in clauses
+        ],
+        "application_recommendation": {
+            "should_apply": "Yes",
+            "confidence": "high",
+            "rationale": "Strong core cloud match with learnable delivery-tool gaps.",
+        },
+    }
+    profile = CandidateProfile(
+        candidate_seniority_signal="junior_to_mid",
+        evidence_claims=[
+            CandidateEvidenceClaim(
+                evidence_id="ev_cloud",
+                resume_quote=(
+                    "Supported AWS, Terraform, Amazon Bedrock, SageMaker, and Docker "
+                    "workloads for enterprise customers."
+                ),
+            )
+        ],
+    )
+
+    with patch.object(analyzer, "_extract_with_gemini_v3", return_value=raw):
+        ir = analyzer.analyze_v3(
+            page_text=page_text,
+            title="Cloud DevOps Engineer",
+            candidate_profile=profile.model_dump(),
+        )
+
+    contract = score_to_public_dict(score_ir_v3(ir))
+    requirement_items = contract["requirements"]["items"]
+    tool_names = {item["name"] for item in contract["tools"]["items"]}
+
+    assert ir.analysis_status == "success"
+    assert len(ir.domain_requirements) == len(clauses) == 8
+    assert len(requirement_items) == 8
+    assert contract["requirements"]["counts"]["must_total"] == 4
+    assert "Infrastructure as Code and CI/CD" in {
+        item["name"] for item in requirement_items
+    }
+    assert {"Terraform", "Jenkins", "GitHub Actions", "Amazon Bedrock", "Amazon ECS"} <= tool_names
+    assert next(
+        layer for layer in contract["layers"] if layer["id"] == "seniority"
+    )["meta"]["candidate_level"] == "junior_to_mid"
