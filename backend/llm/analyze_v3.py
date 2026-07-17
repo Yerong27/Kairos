@@ -63,7 +63,7 @@ from backend.ir.canonicalize import canon_tool
 # =============================
 # Gemini setup
 # =============================
-JOB_ANALYSIS_MODEL = (os.getenv("GEMINI_JOB_MODEL") or "gemini-2.5-flash").strip()
+JOB_ANALYSIS_MODEL = (os.getenv("GEMINI_JOB_MODEL") or "gemini-3.5-flash").strip()
 CATALOG_DIR = pathlib.Path(__file__).parent.parent / "config" / "catalogs"
 _DOMAIN_CATALOG = None
 
@@ -1095,10 +1095,10 @@ OUTPUT LANGUAGE: {output_language}
         temperature=0.0,
         top_p=1.0,
         top_k=1,
-        # The previous 8192-token ceiling encouraged very verbose responses and
-        # increased latency. The schema remains exhaustive, but summaries and
-        # quotes are intentionally concise.
-        max_output_tokens=6144,
+        # Gemini 3.5 Flash may use part of this budget for reasoning before
+        # emitting the structured JSON. Keep enough headroom to avoid a
+        # truncated or empty response on requirement-heavy JDs.
+        max_output_tokens=12288,
         response_mime_type="application/json",
     )
 
