@@ -45,6 +45,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import google.generativeai as genai
+from google.api_core import exceptions as google_api_exceptions
 from google.generativeai.types import GenerationConfig
 
 from backend.ir.schema_v3 import (
@@ -65,6 +66,8 @@ from backend.ir.canonicalize import canon_tool
 # Gemini setup
 # =============================
 JOB_ANALYSIS_MODEL = (os.getenv("GEMINI_JOB_MODEL") or "gemini-3.5-flash").strip()
+JOB_ANALYSIS_TIMEOUT_SECONDS = 60
+JOB_ANALYSIS_MAX_ATTEMPTS = 2
 CATALOG_DIR = pathlib.Path(__file__).parent.parent / "config" / "catalogs"
 _DOMAIN_CATALOG = None
 
@@ -1293,11 +1296,28 @@ OUTPUT LANGUAGE: {output_language}
     rule_seniority = _extract_seniority_rules(page_text)
 
     try:
-        resp = model.generate_content(
-            prompt,
-            generation_config=generation_config,
-            request_options={"timeout": 30},
+        transient_errors = (
+            google_api_exceptions.DeadlineExceeded,
+            google_api_exceptions.GatewayTimeout,
+            google_api_exceptions.BadGateway,
+            google_api_exceptions.ServiceUnavailable,
+            google_api_exceptions.InternalServerError,
         )
+        resp = None
+        for attempt in range(JOB_ANALYSIS_MAX_ATTEMPTS):
+            try:
+                resp = model.generate_content(
+                    prompt,
+                    generation_config=generation_config,
+                    request_options={"timeout": JOB_ANALYSIS_TIMEOUT_SECONDS},
+                )
+                break
+            except transient_errors:
+                if attempt + 1 >= JOB_ANALYSIS_MAX_ATTEMPTS:
+                    raise
+                time.sleep(0.75)
+        if resp is None:
+            raise RuntimeError("Gemini job analysis returned no response")
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
         invalid_jd_evidence = []

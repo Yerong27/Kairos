@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from google.api_core import exceptions as google_api_exceptions
+
 from backend.ir.candidate_profile import CandidateEvidenceClaim, CandidateProfile
 from backend.ir.schema_v3 import (
     AnalyzeIRv3,
@@ -406,6 +408,73 @@ def test_invalid_gemini_jd_passage_id_degrades_instead_of_accepting_text():
 
     assert result["analysis_status"] == "degraded"
     assert "valid JD passage ID" in result["evidence_hints"]["error"]
+
+
+def test_transient_gemini_deadline_is_retried_once_with_longer_timeout():
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, _prompt, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise google_api_exceptions.DeadlineExceeded("temporary deadline")
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "job_title": "Engineer",
+                        "company": "Example",
+                        "job_seniority_signal": "mid",
+                        "domain_requirements": [],
+                    }
+                )
+            )
+
+    with patch.object(analyzer, "_ensure_gemini_configured"), patch.object(
+        analyzer.genai, "GenerativeModel", FakeModel
+    ), patch.object(analyzer.time, "sleep") as sleep:
+        result = analyzer._extract_with_gemini_v3(
+            "Build reliable services.",
+            title="Engineer",
+            output_language="en",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    assert result["analysis_status"] == "success"
+    assert len(calls) == 2
+    assert all(
+        call["request_options"]["timeout"] == analyzer.JOB_ANALYSIS_TIMEOUT_SECONDS
+        for call in calls
+    )
+    sleep.assert_called_once()
+
+
+def test_gemini_quota_error_is_not_blindly_retried():
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, _prompt, **kwargs):
+            calls.append(kwargs)
+            raise google_api_exceptions.TooManyRequests("quota exhausted")
+
+    with patch.object(analyzer, "_ensure_gemini_configured"), patch.object(
+        analyzer.genai, "GenerativeModel", FakeModel
+    ), patch.object(analyzer.time, "sleep") as sleep:
+        result = analyzer._extract_with_gemini_v3(
+            "Build reliable services.",
+            title="Engineer",
+            output_language="en",
+            candidate_profile=CandidateProfile().model_dump(),
+        )
+
+    assert result["analysis_status"] == "degraded"
+    assert len(calls) == 1
+    sleep.assert_not_called()
 
 
 def test_complete_cross_layer_requirement_matrix_preserves_detail_and_keywords():
