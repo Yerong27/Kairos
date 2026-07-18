@@ -1891,13 +1891,24 @@ def _tool_match_confidence(
 
     parts = [part for part in t.split() if part]
     if len(parts) >= 2:
-        # Multi-word named tools/standards require the complete phrase.
-        # Shared suffixes such as "DevOps" cannot prove "Azure DevOps".
         candidate_blob = " ".join(entry.text for entry in entries if entry.text)
-        return 1.0 if _tool_text_hit(t, candidate_blob) else 0.0
+        if _tool_text_hit(t, candidate_blob):
+            return 1.0
+
+        # A branded prefix is often optional in natural writing ("Amazon
+        # SageMaker" vs "SageMaker"). Only accept a highly distinctive
+        # compound suffix; ordinary shared words remain phrase-exact.
+        raw_last = re.sub(r"[^A-Za-z0-9+#.-]", "", str(tool.name).split()[-1])
+        has_internal_capital = any(ch.isupper() for ch in raw_last[1:])
+        if len(raw_last) >= 8 and has_internal_capital:
+            return 1.0 if _tool_text_hit(raw_last, candidate_blob) else 0.0
+        return 0.0
 
     confs: List[float] = []
     confs.append(_match_confidence_string(t, cand_phrases, cand_compacts, entries))
+    candidate_blob = " ".join(entry.text for entry in entries if entry.text)
+    if _tool_text_hit(t, candidate_blob):
+        confs.append(1.0)
 
     for v in _extract_acronym_variants(tool.name):
         confs.append(_match_confidence_string(v, cand_phrases, cand_compacts, entries))
@@ -1945,16 +1956,17 @@ def _tool_text_hit(tool_name: str, candidate_text: str) -> bool:
         return False
 
     t_low = t.lower()
-    if t_low == "gpt-4":
-        return bool(re.search(r"\bgpt[- ]?4\b", low) or "openai gpt-4" in low)
-    if t_low == "gemini":
-        return bool(re.search(r"\bgemini\b", low))
-    if t_low == "aws api gateway":
-        return "api gateway" in low
-
     if " " in t_low:
         return t_low in low
-    return bool(re.search(rf"\b{re.escape(t_low)}\b", low))
+
+    variants = {t_low}
+    # Conservative singular/plural equivalence for short named terms and
+    # acronyms (for example, "VPC" and "VPCs"). No product dictionary needed.
+    if len(t_low) >= 3 and t_low.endswith("s") and not t_low.endswith("ss"):
+        variants.add(t_low[:-1])
+    elif len(t_low) >= 2 and t_low.isalnum():
+        variants.add(t_low + "s")
+    return any(re.search(rf"\b{re.escape(value)}\b", low) for value in variants)
 
 
 # ============================================================
@@ -3585,7 +3597,7 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "engine_version": "v3",
-        "contract": {"name": "kairos_v3_public", "version": "2.6"},
+        "contract": {"name": "kairos_v3_public", "version": "2.7"},
         "decision": decision,
         "score": score,
         "analysis_quality": {

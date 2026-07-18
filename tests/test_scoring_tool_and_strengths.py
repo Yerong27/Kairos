@@ -93,3 +93,33 @@ def test_multiword_named_tool_requires_the_complete_phrase():
 
     assert aws_only.debug_breakdown.per_tool_should["Azure DevOps"] == "missing"
     assert exact_tool.debug_breakdown.per_tool_should["Azure DevOps"] == "hit"
+
+
+def test_distinctive_compound_suffix_and_simple_plural_match_without_alias_table():
+    domains = [
+        DomainRequirement(
+            name="Specialized Platform",
+            importance="should",
+            evidence_quote="Experience with Vendor NovaEngine and ABCs",
+            evidence_level="exact",
+            examples=[
+                ToolEvidence(
+                    name="Vendor NovaEngine",
+                    importance="should",
+                    evidence_quote="Experience with Vendor NovaEngine and ABCs",
+                ),
+                ToolEvidence(
+                    name="ABCs",
+                    importance="should",
+                    evidence_quote="Experience with Vendor NovaEngine and ABCs",
+                ),
+            ],
+        )
+    ]
+    result = score_ir_v3(
+        _make_ir(domains),
+        candidate_text="Built production workflows with NovaEngine and ABC.",
+    )
+
+    assert result.debug_breakdown.per_tool_should["Vendor NovaEngine"] == "hit"
+    assert result.debug_breakdown.per_tool_should["ABCs"] == "hit"

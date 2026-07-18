@@ -328,6 +328,11 @@ def test_illustrative_examples_are_ats_keywords_not_individual_requirements():
 
 def test_notion_uses_user_facing_summary_without_evidence_matrix():
     contract = _public_contract()
+    contract["_candidate_meta"] = {
+        "resume_filename": "resume-v2.docx",
+        "resume_uploaded_at": 1_700_000_000,
+        "resume_hash_prefix": "abc123def456",
+    }
     captured = {}
 
     def fake_post(**kwargs):
@@ -378,5 +383,7 @@ def test_notion_uses_user_facing_summary_without_evidence_matrix():
     assert "Layered Breakdown" not in serialized
     assert "📈 Seniority" in serialized
     assert "Your level: Junior" in serialized
+    assert "Resume used: resume-v2.docx" in serialized
+    assert "ID abc123def456" in serialized
     assert "none=92" not in serialized
     assert "Notes" not in serialized

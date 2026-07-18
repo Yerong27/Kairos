@@ -13,8 +13,9 @@ from google.generativeai.types import GenerationConfig
 
 from backend.ir.candidate_profile import CandidateEvidenceClaim, CandidateProfile, CandidateRole
 from backend.ir.canonicalize import canon_domain, canon_tool
+from backend.resume_sections import section_items
 CANDIDATE_PROFILE_SCHEMA_VERSION = "2.0"
-CANDIDATE_PROFILE_PROMPT_VERSION = "2.1"
+CANDIDATE_PROFILE_PROMPT_VERSION = "2.2"
 CANDIDATE_PROFILE_MODEL = (os.getenv("GEMINI_RESUME_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
 
 
@@ -37,6 +38,45 @@ def _dedupe(values: List[str]) -> List[str]:
             seen.add(key)
             out.append(text)
     return out
+
+
+def _evidence_id(quote: str, role: str = "") -> str:
+    evidence_key = f"{_normalize(quote).lower()}|{_normalize(role).lower()}"
+    return "ev_" + hashlib.sha256(evidence_key.encode("utf-8")).hexdigest()[:12]
+
+
+def _supplement_structured_claims(
+    text: str, claims: List[CandidateEvidenceClaim]
+) -> List[CandidateEvidenceClaim]:
+    """Preserve explicit structured facts even when the model omits a section."""
+    existing = {_normalize(claim.resume_quote).lower() for claim in claims}
+    out = list(claims)
+    type_by_section = {
+        "credentials": "credential",
+        "education": "education",
+        "skills": "capability",
+    }
+    structured_items = section_items(
+        text, {"credentials", "education", "skills"}, limit=50
+    )
+    structured_items.sort(
+        key=lambda item: {"credentials": 0, "education": 1, "skills": 2}.get(
+            item[0], 3
+        )
+    )
+    for section, quote in structured_items[:36]:
+        key = _normalize(quote).lower()
+        if key in existing:
+            continue
+        existing.add(key)
+        out.append(
+            CandidateEvidenceClaim(
+                evidence_id=_evidence_id(quote),
+                claim_type=type_by_section[section],
+                resume_quote=quote,
+            )
+        )
+    return out[:76]
 
 
 def _ensure_configured() -> None:
@@ -178,8 +218,7 @@ def analyze_resume(resume_text: str) -> CandidateProfile:
             "other",
         }:
             claim_type = "other"
-        evidence_key = f"{quote.lower()}|{_normalize(item.get('role')).lower()}"
-        evidence_id = "ev_" + hashlib.sha256(evidence_key.encode("utf-8")).hexdigest()[:12]
+        evidence_id = _evidence_id(quote, _normalize(item.get("role")))
         claims.append(
             CandidateEvidenceClaim(
                 evidence_id=evidence_id,
@@ -194,6 +233,8 @@ def analyze_resume(resume_text: str) -> CandidateProfile:
         grounded_domains.extend(domains)
         if len(claims) >= 40:
             break
+
+    claims = _supplement_structured_claims(text, claims)
 
     roles: List[CandidateRole] = []
     for item in raw.get("roles") or []:

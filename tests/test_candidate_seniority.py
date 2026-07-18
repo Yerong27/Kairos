@@ -57,6 +57,31 @@ Senior Cloud Engineer | Example Co
     assert reason == "recent_explicit_12m"
 
 
+def test_education_date_range_is_not_counted_as_work_experience():
+    now = time.gmtime()
+    start_year = now.tm_year - 2
+    month = _month_name(now.tm_mon)
+    resume = f"""
+PROFESSIONAL EXPERIENCE
+Cloud Support Associate | Example
+{month} {start_year} – PRESENT
+- Troubleshoot cloud services and guide customers.
+
+EDUCATION
+Diploma of Applied Technology | Example Institute
+{month} {start_year - 2} – {month} {start_year}
+"""
+
+    level, reason, entries = _derive_candidate_level_from_experience(
+        resume, job_family="tech_swe"
+    )
+
+    assert level == "junior_to_mid"
+    assert "relevant_experience_24m" in reason
+    assert len(entries) == 1
+    assert "Cloud Support Associate" in entries[0]["title"]
+
+
 def test_unknown_candidate_seniority_stays_unknown_and_neutral():
     ir = AnalyzeIRv3(
         job_title="Cloud Engineer",

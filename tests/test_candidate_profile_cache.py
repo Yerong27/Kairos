@@ -85,6 +85,52 @@ def test_resume_parser_keeps_only_resume_grounded_claims():
     assert "Candidate domains:" not in evidence_text
 
 
+def test_resume_parser_preserves_structured_facts_omitted_by_model():
+    resume = """PROFESSIONAL EXPERIENCE
+Support Associate | Example
+JAN 2024 – PRESENT
+Supported customer workloads.
+
+CERTIFICATIONS
+Certified Platform Practitioner
+Certified Solutions Professional
+
+EDUCATION
+Diploma of Applied Technology | Example Institute
+JAN 2022 – JAN 2024
+"""
+    payload = {
+        "candidate_skills": [],
+        "candidate_domains": [],
+        "evidence_claims": [
+            {
+                "resume_quote": "Supported customer workloads.",
+                "claim_type": "experience",
+                "skills": [],
+                "domains": [],
+            }
+        ],
+        "roles": [],
+    }
+
+    class FakeModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def generate_content(self, *_args, **_kwargs):
+            return SimpleNamespace(text=json.dumps(payload))
+
+    with patch.object(resume_analyzer, "_ensure_configured"), patch.object(
+        resume_analyzer.genai, "GenerativeModel", FakeModel
+    ):
+        profile = resume_analyzer.analyze_resume(resume)
+
+    claims = {claim.resume_quote: claim.claim_type for claim in profile.evidence_claims}
+    assert claims["Certified Platform Practitioner"] == "credential"
+    assert claims["Certified Solutions Professional"] == "credential"
+    assert claims["Diploma of Applied Technology | Example Institute"] == "education"
+
+
 def test_resume_parser_retries_truncated_json_with_compact_prompt():
     resume = "Cloud Engineer\nBuilt production services with Python and FastAPI."
     payload = {

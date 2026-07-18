@@ -1177,7 +1177,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 ) from exc
 
             cache_key = _sha256_text(
-                "kairos_v3_public:2.6",
+                "kairos_v3_public:2.7",
                 _canonical_jd_for_cache(req.page_text or ""),
                 resume_hash,
                 CANDIDATE_PROFILE_MODEL,
@@ -1244,6 +1244,12 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                     api_data["_candidate_meta"] = {
                         "evidence_preview": _clamp_text(candidate_evidence_text, 800),
                         "evidence_mode": "extracted_lines",
+                        "resume_filename": _safe_str(user.get("resume_filename")),
+                        "resume_uploaded_at": user.get("resume_uploaded_at"),
+                        "resume_hash_prefix": resume_hash[:12],
+                        "profile_model": CANDIDATE_PROFILE_MODEL,
+                        "profile_schema_version": CANDIDATE_PROFILE_SCHEMA_VERSION,
+                        "profile_prompt_version": CANDIDATE_PROFILE_PROMPT_VERSION,
                     }
                     if _contract_is_reliable(api_data):
                         _write_json_file(cache_path, api_data)

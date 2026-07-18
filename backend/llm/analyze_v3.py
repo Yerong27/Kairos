@@ -59,6 +59,7 @@ from backend.ir.schema_v3 import (
     ApplicationRecommendation,
 )
 from backend.ir.candidate_profile import CandidateProfile
+from backend.resume_sections import resume_heading_kind, resume_section_map
 from backend.ir.domain_catalog import load_domain_catalogs, adjudicate_domains
 from backend.ir.canonicalize import canon_tool
 
@@ -1181,6 +1182,8 @@ GLOBAL RULES:
      Never emit reversed duplicate requirements for each choice.
    - Terms introduced by "such as", "including", "e.g.", or "for example"
      belong in `examples[]` and are not independent requirements.
+   - Those example lists are illustrative, not exhaustive. Do not downgrade a
+     satisfied parent capability merely because one listed example is absent.
    - A named tool/system is its own requirement only when the JD explicitly
      requires proficiency, certification, or experience with that exact item.
 
@@ -2175,6 +2178,8 @@ def _experience_block_text(lines: List[str], idx: int, title: str) -> str:
         stripped = line.strip()
         if not stripped:
             continue
+        if line != lines[idx] and resume_heading_kind(stripped) is not None:
+            break
         if body and (stripped != lines[idx].strip()) and (_DATE_RANGE_RE.search(stripped) or _YEAR_RANGE_RE.search(stripped)):
             break
         body.append(stripped)
@@ -2183,9 +2188,12 @@ def _experience_block_text(lines: List[str], idx: int, title: str) -> str:
 
 def _parse_experience_blocks(text: str, *, job_family: str = "general") -> List[Dict[str, Any]]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
+    sections, has_sections = resume_section_map(lines)
     entries: List[Dict[str, Any]] = []
     for idx, ln in enumerate(lines):
         if not ln:
+            continue
+        if has_sections and sections[idx] != "experience":
             continue
 
         m = _DATE_RANGE_RE.search(ln)

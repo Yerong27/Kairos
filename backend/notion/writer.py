@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -813,8 +814,27 @@ def create_notion_page(
             },
         },
         _notion_paragraph(getattr(resp, "summary", "") or ""),
-        _notion_divider(),
     ]
+
+    candidate_meta = (
+        public_contract.get("_candidate_meta")
+        if isinstance(public_contract, dict)
+        else None
+    )
+    if isinstance(candidate_meta, dict):
+        filename = _safe_str(candidate_meta.get("resume_filename")).strip()
+        hash_prefix = _safe_str(candidate_meta.get("resume_hash_prefix")).strip()
+        uploaded = candidate_meta.get("resume_uploaded_at")
+        date_text = ""
+        try:
+            if uploaded:
+                date_text = datetime.fromtimestamp(int(uploaded)).astimezone().strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OSError):
+            date_text = ""
+        parts = [part for part in (filename, date_text, f"ID {hash_prefix}" if hash_prefix else "") if part]
+        if parts:
+            blocks.append(_notion_paragraph("Resume used: " + " • ".join(parts)))
+    blocks.append(_notion_divider())
 
     if isinstance(public_contract, dict):
         requirement_blocks = _render_requirement_summary_to_notion(public_contract)
