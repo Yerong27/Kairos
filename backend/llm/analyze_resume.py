@@ -79,6 +79,50 @@ def _supplement_structured_claims(
     return out[:76]
 
 
+def build_local_resume_profile(resume_text: str) -> CandidateProfile:
+    """Build a resume-grounded fallback when the AI service is unavailable."""
+    text = (resume_text or "").strip()
+    if len(text) < 30:
+        raise ValueError("Resume text is too short to analyze")
+
+    priority = {
+        "credentials": 0,
+        "skills": 1,
+        "experience": 2,
+        "projects": 3,
+        "education": 4,
+    }
+    items = section_items(text, set(priority), limit=80)
+    items.sort(key=lambda item: priority.get(item[0], 9))
+    type_by_section = {
+        "credentials": "credential",
+        "skills": "capability",
+        "experience": "experience",
+        "projects": "achievement",
+        "education": "education",
+    }
+    claims = [
+        CandidateEvidenceClaim(
+            evidence_id=_evidence_id(quote),
+            claim_type=type_by_section[section],
+            resume_quote=quote,
+        )
+        for section, quote in items[:60]
+    ]
+    if not claims:
+        raise ValueError(
+            "No structured resume sections were available for a local fallback profile."
+        )
+
+    return CandidateProfile(
+        candidate_seniority_signal="unknown",
+        seniority_reason="deferred_to_job_family_analysis",
+        evidence_claims=claims,
+        analysis_status="degraded",
+        raw_llm_json={"profile_source": "local_structured_fallback"},
+    )
+
+
 def _ensure_configured() -> None:
     key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not key:
@@ -302,5 +346,6 @@ __all__ = [
     "CANDIDATE_PROFILE_PROMPT_VERSION",
     "CANDIDATE_PROFILE_SCHEMA_VERSION",
     "analyze_resume",
+    "build_local_resume_profile",
     "candidate_profile_evidence_text",
 ]

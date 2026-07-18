@@ -46,6 +46,7 @@ try:
         CANDIDATE_PROFILE_PROMPT_VERSION,
         CANDIDATE_PROFILE_SCHEMA_VERSION,
         analyze_resume as kairos_analyze_resume,
+        build_local_resume_profile,
         candidate_profile_evidence_text,
     )
     from backend.ir.candidate_profile import CandidateProfile
@@ -54,6 +55,7 @@ except Exception:
     _V3_AVAILABLE = False
     kairos_analyze_v3 = None  # type: ignore
     kairos_analyze_resume = None  # type: ignore
+    build_local_resume_profile = None  # type: ignore
     candidate_profile_evidence_text = None  # type: ignore
     CandidateProfile = None  # type: ignore
     JOB_ANALYSIS_MODEL = "unknown"
@@ -408,6 +410,18 @@ def _candidate_profile_record_is_current(record: Any, resume_hash: str) -> bool:
     return bool(
         isinstance(record, dict)
         and record.get("status") == "ready"
+        and record.get("profile_json")
+        and record.get("resume_hash") == resume_hash
+        and record.get("model") == CANDIDATE_PROFILE_MODEL
+        and record.get("schema_version") == CANDIDATE_PROFILE_SCHEMA_VERSION
+        and record.get("prompt_version") == CANDIDATE_PROFILE_PROMPT_VERSION
+    )
+
+
+def _candidate_profile_record_is_usable(record: Any, resume_hash: str) -> bool:
+    return bool(
+        isinstance(record, dict)
+        and record.get("status") in {"ready", "degraded"}
         and record.get("profile_json")
         and record.get("resume_hash") == resume_hash
         and record.get("model") == CANDIDATE_PROFILE_MODEL
@@ -953,7 +967,7 @@ def status(authorization: Optional[str] = Header(None)):
         "resume_filename": user.get("resume_filename"),
         "resume_uploaded_at": user.get("resume_uploaded_at"),
         "candidate_profile_status": profile_record.get("status") if profile_record else "missing",
-        "candidate_profile_current": _candidate_profile_record_is_current(
+        "candidate_profile_current": _candidate_profile_record_is_usable(
             profile_record, _safe_str(user.get("resume_hash"))
         ),
     }
@@ -1114,6 +1128,34 @@ def upload_resume(file: UploadFile = File(...), authorization: Optional[str] = H
         }
     except Exception as exc:
         detail = _clamp_text(str(exc), 500) or "Resume AI parsing failed."
+        try:
+            fallback = build_local_resume_profile(text)  # type: ignore[misc]
+            fallback_data = (
+                fallback.model_dump()
+                if hasattr(fallback, "model_dump")
+                else dict(fallback)
+            )
+            _store_candidate_profile_record(
+                user_token=user_token,
+                resume_hash=resume_hash,
+                status="degraded",
+                profile=fallback_data,
+                error=detail,
+            )
+            return {
+                "status": "saved",
+                "resume_filename": filename,
+                "resume_uploaded_at": int(time.time()),
+                "resume_changed": changed,
+                "candidate_profile_status": "degraded",
+                "candidate_profile_reused": False,
+                "warning": (
+                    "Gemini timed out, so Kairos created a resume-grounded local "
+                    "profile. You can analyze jobs now, or re-upload later to retry AI enrichment."
+                ),
+            }
+        except Exception:
+            pass
         _store_candidate_profile_record(
             user_token=user_token, resume_hash=resume_hash, status="error", error=detail
         )
@@ -1156,7 +1198,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
             timings_ms: Dict[str, int] = {}
             resume_hash = _safe_str(user.get("resume_hash")) or _sha256_text("kairos_resume:1", resume_text)
             profile_record = _get_candidate_profile_record(user_token)
-            if not _candidate_profile_record_is_current(profile_record, resume_hash):
+            if not _candidate_profile_record_is_usable(profile_record, resume_hash):
                 status_value = profile_record.get("status") if isinstance(profile_record, dict) else "missing"
                 error_value = profile_record.get("error") if isinstance(profile_record, dict) else ""
                 raise HTTPException(

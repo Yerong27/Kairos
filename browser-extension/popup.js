@@ -67,17 +67,24 @@ function refreshStatus() {
         notionMsg.textContent = "";
         if (data.resume_present) {
           const profileReady = Boolean(data.candidate_profile_current);
-          resumeStatus.textContent = profileReady ? "Resume ready" : "Profile needs attention";
-          setTone(resumeDot, profileReady ? "success" : "error");
+          const localFallback = data.candidate_profile_status === "degraded";
+          resumeStatus.textContent = localFallback
+            ? "Resume ready (local profile)"
+            : profileReady
+              ? "Resume ready"
+              : "Profile needs attention";
+          setTone(resumeDot, localFallback ? "warning" : profileReady ? "success" : "error");
           const meta = [];
           if (data.resume_filename) meta.push(data.resume_filename);
           if (data.resume_uploaded_at) meta.push(new Date(data.resume_uploaded_at * 1000).toLocaleDateString());
           resumeMeta.textContent = meta.join(" • ");
           uploadBtn.disabled = false;
           analyzeBtn.disabled = !profileReady;
-          analyzeMsg.textContent = profileReady
-            ? ""
-            : "Re-upload the resume to create or retry its Candidate Profile.";
+          analyzeMsg.textContent = localFallback
+            ? "AI enrichment timed out. Local resume evidence will be used; re-upload later to retry."
+            : profileReady
+              ? ""
+              : "Re-upload the resume to create or retry its Candidate Profile.";
         } else {
           resumeStatus.textContent = "No resume uploaded";
           setTone(resumeDot, "warning");
@@ -146,6 +153,8 @@ function uploadSelectedResume() {
           uploadMsg.textContent = data.candidate_profile_reused
             ? "Upload complete. Existing Candidate Profile reused."
             : "Upload complete. Candidate Profile created.";
+        } else if (data.candidate_profile_status === "degraded") {
+          uploadMsg.textContent = data.warning || "Upload complete. Local Candidate Profile created.";
         } else {
           uploadMsg.textContent = data.warning || "Resume saved, but Candidate Profile creation failed. Re-upload to retry.";
         }

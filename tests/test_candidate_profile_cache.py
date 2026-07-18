@@ -131,6 +131,29 @@ JAN 2022 – JAN 2024
     assert claims["Diploma of Applied Technology | Example Institute"] == "education"
 
 
+def test_local_profile_fallback_is_grounded_in_resume_sections():
+    resume = """SKILLS
+Incident investigation and stakeholder communication
+
+PROFESSIONAL EXPERIENCE
+Support Associate | Example
+JAN 2024 – PRESENT
+Resolved complex customer incidents.
+
+CERTIFICATIONS
+Certified Platform Practitioner
+"""
+
+    profile = resume_analyzer.build_local_resume_profile(resume)
+
+    assert profile.analysis_status == "degraded"
+    assert profile.candidate_seniority_signal == "unknown"
+    quotes = {claim.resume_quote for claim in profile.evidence_claims}
+    assert "Incident investigation and stakeholder communication" in quotes
+    assert "Resolved complex customer incidents." in quotes
+    assert "Certified Platform Practitioner" in quotes
+
+
 def test_resume_parser_retries_truncated_json_with_compact_prompt():
     resume = "Cloud Engineer\nBuilt production services with Python and FastAPI."
     payload = {
@@ -232,6 +255,52 @@ def test_resume_profile_is_reused_until_resume_content_changes():
             record = main._get_candidate_profile_record("user")
             assert record["resume_hash"] == user["resume_hash"]
             assert '"Go"' in record["profile_json"]
+
+
+def test_ai_timeout_creates_usable_local_profile_and_allows_later_retry():
+    client = TestClient(main.app)
+    resume = b"""SKILLS
+Incident investigation and stakeholder communication
+
+PROFESSIONAL EXPERIENCE
+Support Associate | Example
+JAN 2024 - PRESENT
+Resolved complex customer incidents.
+
+CERTIFICATIONS
+Certified Platform Practitioner
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with patch.object(main, "NOTION_OAUTH_DB", db_path), patch.object(
+            main, "kairos_analyze_resume", side_effect=TimeoutError("504 Deadline Exceeded")
+        ) as parser:
+            main._store_notion_user(
+                user_token="user",
+                access_token="notion-token",
+                database_id="database",
+                database_name="Jobs",
+            )
+            headers = {"Authorization": "Bearer user"}
+            first = client.post(
+                "/resume/upload",
+                files={"file": ("resume.txt", resume, "text/plain")},
+                headers=headers,
+            )
+            status = client.get("/status", headers=headers)
+            retried = client.post(
+                "/resume/upload",
+                files={"file": ("resume.txt", resume, "text/plain")},
+                headers=headers,
+            )
+
+    assert first.status_code == retried.status_code == status.status_code == 200
+    assert first.json()["candidate_profile_status"] == "degraded"
+    assert "analyze jobs now" in first.json()["warning"]
+    assert status.json()["candidate_profile_current"] is True
+    assert status.json()["candidate_profile_status"] == "degraded"
+    assert retried.json()["candidate_profile_reused"] is False
+    assert parser.call_count == 2
 
 
 def test_docx_resume_upload_extracts_body_tables_and_header():
