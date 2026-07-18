@@ -3,21 +3,16 @@ const API_BASE = "http://127.0.0.1:8000";
 const notionStatus = document.getElementById("notion-status");
 const notionDot = document.getElementById("notion-dot");
 const dbName = document.getElementById("db-name");
-const resumeSection = document.getElementById("resume-section");
-const analyzeSection = document.getElementById("analyze-section");
 const resumeStatus = document.getElementById("resume-status");
 const resumeDot = document.getElementById("resume-dot");
 const resumeMeta = document.getElementById("resume-meta");
 const uploadBtn = document.getElementById("upload-btn");
 const uploadMsg = document.getElementById("upload-msg");
 const resumeFile = document.getElementById("resume-file");
-const chooseFileBtn = document.getElementById("choose-file-btn");
-const fileNameEl = document.getElementById("file-name");
 const analyzeBtn = document.getElementById("analyze-btn");
 const analyzeMsg = document.getElementById("analyze-msg");
 const notionMsg = document.getElementById("notion-msg");
 const connectBtn = document.getElementById("connect-btn");
-const changeDbBtn = document.getElementById("change-db-btn");
 
 function setTone(element, tone) {
   if (tone) element.dataset.tone = tone;
@@ -34,22 +29,21 @@ function getToken(cb) {
 function setStatusDisconnected() {
   notionStatus.textContent = "Not connected";
   setTone(notionDot, "warning");
-  dbName.textContent = "";
-  resumeStatus.textContent = "Resume not available";
+  dbName.textContent = "Connect to choose a database";
+  resumeStatus.textContent = "Connect Notion first";
   setTone(resumeDot, "warning");
-  resumeMeta.textContent = "";
-  notionMsg.textContent = "Connect Notion to continue.";
-  resumeSection.classList.add("hidden");
-  analyzeSection.classList.add("hidden");
+  resumeMeta.textContent = "PDF, DOCX, or TXT";
+  notionMsg.textContent = "";
+  uploadMsg.textContent = "";
+  analyzeMsg.textContent = "";
   uploadBtn.disabled = true;
   analyzeBtn.disabled = true;
-  connectBtn.classList.remove("hidden");
-  changeDbBtn.classList.add("hidden");
-  changeDbBtn.disabled = true;
+  connectBtn.textContent = "Connect";
+  connectBtn.disabled = false;
 }
 
 function refreshStatus() {
-  notionMsg.textContent = "Checking connection...";
+  notionMsg.textContent = "";
   getToken((token) => {
     if (!token) {
       setStatusDisconnected();
@@ -68,10 +62,9 @@ function refreshStatus() {
         notionStatus.textContent = data.notion_connected ? "Connected" : "Not connected";
         setTone(notionDot, data.notion_connected ? "success" : "warning");
         dbName.textContent = data.database_name || "No database selected";
-        changeDbBtn.disabled = false;
-        connectBtn.classList.toggle("hidden", Boolean(data.notion_connected));
-        changeDbBtn.classList.toggle("hidden", !data.notion_connected);
-        notionMsg.textContent = data.notion_connected ? "" : "Connect Notion to continue.";
+        connectBtn.textContent = data.notion_connected ? "Change" : "Connect";
+        connectBtn.disabled = false;
+        notionMsg.textContent = "";
         if (data.resume_present) {
           const profileReady = Boolean(data.candidate_profile_current);
           resumeStatus.textContent = profileReady ? "Resume ready" : "Profile needs attention";
@@ -80,8 +73,6 @@ function refreshStatus() {
           if (data.resume_filename) meta.push(data.resume_filename);
           if (data.resume_uploaded_at) meta.push(new Date(data.resume_uploaded_at * 1000).toLocaleDateString());
           resumeMeta.textContent = meta.join(" • ");
-          resumeSection.classList.remove("hidden");
-          analyzeSection.classList.remove("hidden");
           uploadBtn.disabled = false;
           analyzeBtn.disabled = !profileReady;
           analyzeMsg.textContent = profileReady
@@ -90,21 +81,22 @@ function refreshStatus() {
         } else {
           resumeStatus.textContent = "No resume uploaded";
           setTone(resumeDot, "warning");
-          resumeMeta.textContent = "";
-          resumeSection.classList.remove("hidden");
-          analyzeSection.classList.remove("hidden");
+          resumeMeta.textContent = "PDF, DOCX, or TXT";
           uploadBtn.disabled = false;
           analyzeBtn.disabled = true;
-          analyzeMsg.textContent = "Upload a resume before analyzing.";
+          analyzeMsg.textContent = "";
         }
       })
       .catch(() => {
-        notionStatus.textContent = "Connection error";
+        notionStatus.textContent = "Backend offline";
         setTone(notionDot, "error");
         setTone(resumeDot, "error");
-        notionMsg.textContent = "Backend not reachable at 127.0.0.1:8000.";
-        resumeSection.classList.add("hidden");
-        analyzeSection.classList.add("hidden");
+        dbName.textContent = "Start Kairos at 127.0.0.1:8000";
+        resumeStatus.textContent = "Unavailable";
+        resumeMeta.textContent = "";
+        notionMsg.textContent = "";
+        uploadMsg.textContent = "";
+        analyzeMsg.textContent = "";
         uploadBtn.disabled = true;
         analyzeBtn.disabled = true;
       });
@@ -115,29 +107,23 @@ connectBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "OPEN_NOTION_CONNECT" });
 });
 
-changeDbBtn.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "OPEN_NOTION_CONNECT" });
-});
-
-uploadBtn.addEventListener("click", () => {
+function uploadSelectedResume() {
   uploadMsg.textContent = "";
   const file = resumeFile.files && resumeFile.files[0];
   if (!file) {
-    uploadMsg.textContent = "Please choose a PDF, DOCX, or TXT file.";
     return;
   }
   uploadBtn.disabled = true;
   uploadBtn.textContent = "Creating profile…";
   resumeFile.disabled = true;
-  chooseFileBtn.disabled = true;
+  resumeMeta.textContent = file.name;
 
   getToken((token) => {
     if (!token) {
       uploadMsg.textContent = "Connect Notion first.";
       uploadBtn.disabled = false;
-      uploadBtn.textContent = "Upload resume";
+      uploadBtn.textContent = "Choose file";
       resumeFile.disabled = false;
-      chooseFileBtn.disabled = false;
       return;
     }
     const form = new FormData();
@@ -170,20 +156,19 @@ uploadBtn.addEventListener("click", () => {
       })
       .finally(() => {
         uploadBtn.disabled = false;
-        uploadBtn.textContent = "Upload resume";
+        uploadBtn.textContent = "Choose file";
         resumeFile.disabled = false;
-        chooseFileBtn.disabled = false;
+        resumeFile.value = "";
       });
   });
-});
+}
 
-chooseFileBtn.addEventListener("click", () => {
+uploadBtn.addEventListener("click", () => {
   resumeFile.click();
 });
 
 resumeFile.addEventListener("change", () => {
-  const file = resumeFile.files && resumeFile.files[0];
-  fileNameEl.textContent = file ? file.name : "PDF, DOCX, or TXT";
+  uploadSelectedResume();
 });
 
 analyzeBtn.addEventListener("click", () => {

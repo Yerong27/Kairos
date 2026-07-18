@@ -2,6 +2,7 @@ import tempfile
 import json
 import sqlite3
 import time
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,16 +189,24 @@ def test_resume_profile_is_reused_until_resume_content_changes():
 
 
 def test_docx_resume_upload_extracts_body_tables_and_header():
-    from docx import Document
-
-    document = Document()
-    document.sections[0].header.paragraphs[0].text = "Candidate Name | Melbourne"
-    document.add_paragraph("Built production services with Python and AWS.")
-    table = document.add_table(rows=1, cols=2)
-    table.cell(0, 0).text = "Certification"
-    table.cell(0, 1).text = "AWS Solutions Architect"
     content = BytesIO()
-    document.save(content)
+    word_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="{word_ns}"><w:body>
+  <w:p><w:r><w:t>Built production services with Python and AWS.</w:t></w:r></w:p>
+  <w:tbl><w:tr>
+    <w:tc><w:p><w:r><w:t>Certification</w:t></w:r></w:p></w:tc>
+    <w:tc><w:p><w:r><w:t>AWS Solutions Architect</w:t></w:r></w:p></w:tc>
+  </w:tr></w:tbl>
+</w:body></w:document>"""
+    header_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<w:hdr xmlns:w="{word_ns}">
+  <w:p><w:r><w:t>Candidate Name | Melbourne</w:t></w:r></w:p>
+</w:hdr>"""
+    with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/header1.xml", header_xml)
 
     captured = {}
 

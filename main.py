@@ -15,6 +15,7 @@ import traceback
 import html
 import io
 import zipfile
+import xml.etree.ElementTree as ET
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlencode
 
@@ -972,26 +973,31 @@ def _extract_docx_text(content: bytes) -> str:
                 raise ValueError("Password-protected DOCX files are not supported.")
             if sum(member.file_size for member in members) > MAX_DOCX_UNCOMPRESSED_BYTES:
                 raise ValueError("The expanded DOCX is too large.")
+            xml_parts = [
+                "word/document.xml",
+                *sorted(
+                    name
+                    for name in names
+                    if re.fullmatch(r"word/(?:header|footer)\d+\.xml", name)
+                ),
+            ]
+            xml_payloads = [archive.read(name) for name in xml_parts]
     except zipfile.BadZipFile as exc:
         raise ValueError("The file is not a valid DOCX document.") from exc
-
-    try:
-        from docx import Document  # type: ignore
-        from docx.oxml.ns import qn  # type: ignore
-    except Exception as exc:
-        raise RuntimeError("DOCX parsing requires python-docx.") from exc
-
-    try:
-        document = Document(io.BytesIO(content))
-    except Exception as exc:
+    except (KeyError, OSError) as exc:
         raise ValueError("The DOCX could not be opened. It may be damaged or unsupported.") from exc
 
-    paragraph_tag = qn("w:p")
-    text_tag = qn("w:t")
-    tab_tag = qn("w:tab")
-    break_tags = {qn("w:br"), qn("w:cr")}
+    word_namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    paragraph_tag = f"{{{word_namespace}}}p"
+    text_tag = f"{{{word_namespace}}}t"
+    tab_tag = f"{{{word_namespace}}}tab"
+    break_tags = {f"{{{word_namespace}}}br", f"{{{word_namespace}}}cr"}
 
-    def _part_lines(element: Any) -> List[str]:
+    def _part_lines(payload: bytes) -> List[str]:
+        try:
+            element = ET.fromstring(payload)
+        except ET.ParseError as exc:
+            raise ValueError("The DOCX contains invalid Word XML.") from exc
         lines: List[str] = []
         for paragraph in element.iter(paragraph_tag):
             pieces: List[str] = []
@@ -1007,19 +1013,9 @@ def _extract_docx_text(content: bytes) -> str:
                 lines.extend(part.strip() for part in value.splitlines() if part.strip())
         return lines
 
-    parts: List[Any] = [document.element.body]
-    seen_header_footer_parts = set()
-    for section in document.sections:
-        for container in (section.header, section.footer):
-            part_name = str(container.part.partname)
-            if part_name in seen_header_footer_parts:
-                continue
-            seen_header_footer_parts.add(part_name)
-            parts.append(container._element)
-
     lines: List[str] = []
-    for part in parts:
-        lines.extend(_part_lines(part))
+    for payload in xml_payloads:
+        lines.extend(_part_lines(payload))
     return "\n".join(lines).strip()
 
 
@@ -1061,7 +1057,7 @@ def upload_resume(file: UploadFile = File(...), authorization: Optional[str] = H
     ):
         try:
             text = _extract_docx_text(content)
-        except (ValueError, RuntimeError) as exc:
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, or TXT.")
