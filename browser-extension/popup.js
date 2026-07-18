@@ -123,7 +123,7 @@ uploadBtn.addEventListener("click", () => {
   uploadMsg.textContent = "";
   const file = resumeFile.files && resumeFile.files[0];
   if (!file) {
-    uploadMsg.textContent = "Please choose a TXT or PDF file.";
+    uploadMsg.textContent = "Please choose a PDF, DOCX, or TXT file.";
     return;
   }
   uploadBtn.disabled = true;
@@ -183,7 +183,7 @@ chooseFileBtn.addEventListener("click", () => {
 
 resumeFile.addEventListener("change", () => {
   const file = resumeFile.files && resumeFile.files[0];
-  fileNameEl.textContent = file ? file.name : "PDF or TXT";
+  fileNameEl.textContent = file ? file.name : "PDF, DOCX, or TXT";
 });
 
 analyzeBtn.addEventListener("click", () => {

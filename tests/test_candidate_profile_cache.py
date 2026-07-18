@@ -2,6 +2,7 @@ import tempfile
 import json
 import sqlite3
 import time
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -184,6 +185,86 @@ def test_resume_profile_is_reused_until_resume_content_changes():
             record = main._get_candidate_profile_record("user")
             assert record["resume_hash"] == user["resume_hash"]
             assert '"Go"' in record["profile_json"]
+
+
+def test_docx_resume_upload_extracts_body_tables_and_header():
+    from docx import Document
+
+    document = Document()
+    document.sections[0].header.paragraphs[0].text = "Candidate Name | Melbourne"
+    document.add_paragraph("Built production services with Python and AWS.")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Certification"
+    table.cell(0, 1).text = "AWS Solutions Architect"
+    content = BytesIO()
+    document.save(content)
+
+    captured = {}
+
+    def parse_resume(text):
+        captured["text"] = text
+        return _profile("Python")
+
+    client = TestClient(main.app)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with patch.object(main, "NOTION_OAUTH_DB", db_path), patch.object(
+            main, "kairos_analyze_resume", side_effect=parse_resume
+        ):
+            main._store_notion_user(
+                user_token="user",
+                access_token="notion-token",
+                database_id="database",
+                database_name="Jobs",
+            )
+            response = client.post(
+                "/resume/upload",
+                files={
+                    "file": (
+                        "resume.docx",
+                        content.getvalue(),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+                headers={"Authorization": "Bearer user"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_profile_status"] == "ready"
+    assert "Built production services with Python and AWS." in captured["text"]
+    assert "Certification" in captured["text"]
+    assert "AWS Solutions Architect" in captured["text"]
+    assert "Candidate Name | Melbourne" in captured["text"]
+
+
+def test_invalid_docx_is_rejected_without_calling_ai_parser():
+    client = TestClient(main.app)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "oauth.db"
+        with patch.object(main, "NOTION_OAUTH_DB", db_path), patch.object(
+            main, "kairos_analyze_resume"
+        ) as parser:
+            main._store_notion_user(
+                user_token="user",
+                access_token="notion-token",
+                database_id="database",
+                database_name="Jobs",
+            )
+            response = client.post(
+                "/resume/upload",
+                files={
+                    "file": (
+                        "broken.docx",
+                        b"this is not a DOCX package",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+                headers={"Authorization": "Bearer user"},
+            )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "The file is not a valid DOCX document."
+    parser.assert_not_called()
 
 
 def test_same_resume_is_reparsed_when_candidate_profile_logic_version_changes():

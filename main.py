@@ -13,6 +13,8 @@ import sqlite3
 import time
 import traceback
 import html
+import io
+import zipfile
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlencode
 
@@ -69,6 +71,7 @@ OAUTH_SESSION_TTL_SECONDS = 20 * 60
 AUTH_CODE_TTL_SECONDS = 5 * 60
 MAX_RESUME_BYTES = 10 * 1024 * 1024
 MAX_RESUME_TEXT_CHARS = 200_000
+MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 # v3 cache dir
 V3_CACHE_DIR = DATA_DIR / "v3_cache"
@@ -955,6 +958,71 @@ def status(authorization: Optional[str] = Header(None)):
     }
 
 
+def _extract_docx_text(content: bytes) -> str:
+    """Extract visible paragraph text from a safe, valid DOCX package."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            members = archive.infolist()
+            names = {member.filename for member in members}
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise ValueError("The file is not a valid DOCX document.")
+            if len(members) > 2_000:
+                raise ValueError("The DOCX contains too many embedded files.")
+            if any(member.flag_bits & 0x1 for member in members):
+                raise ValueError("Password-protected DOCX files are not supported.")
+            if sum(member.file_size for member in members) > MAX_DOCX_UNCOMPRESSED_BYTES:
+                raise ValueError("The expanded DOCX is too large.")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("The file is not a valid DOCX document.") from exc
+
+    try:
+        from docx import Document  # type: ignore
+        from docx.oxml.ns import qn  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("DOCX parsing requires python-docx.") from exc
+
+    try:
+        document = Document(io.BytesIO(content))
+    except Exception as exc:
+        raise ValueError("The DOCX could not be opened. It may be damaged or unsupported.") from exc
+
+    paragraph_tag = qn("w:p")
+    text_tag = qn("w:t")
+    tab_tag = qn("w:tab")
+    break_tags = {qn("w:br"), qn("w:cr")}
+
+    def _part_lines(element: Any) -> List[str]:
+        lines: List[str] = []
+        for paragraph in element.iter(paragraph_tag):
+            pieces: List[str] = []
+            for node in paragraph.iter():
+                if node.tag == text_tag and node.text:
+                    pieces.append(node.text)
+                elif node.tag == tab_tag:
+                    pieces.append("\t")
+                elif node.tag in break_tags:
+                    pieces.append("\n")
+            value = "".join(pieces).strip()
+            if value:
+                lines.extend(part.strip() for part in value.splitlines() if part.strip())
+        return lines
+
+    parts: List[Any] = [document.element.body]
+    seen_header_footer_parts = set()
+    for section in document.sections:
+        for container in (section.header, section.footer):
+            part_name = str(container.part.partname)
+            if part_name in seen_header_footer_parts:
+                continue
+            seen_header_footer_parts.add(part_name)
+            parts.append(container._element)
+
+    lines: List[str] = []
+    for part in parts:
+        lines.extend(_part_lines(part))
+    return "\n".join(lines).strip()
+
+
 @app.post("/resume/upload")
 def upload_resume(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     user_token = _get_bearer_token(authorization)
@@ -977,7 +1045,6 @@ def upload_resume(file: UploadFile = File(...), authorization: Optional[str] = H
             from pypdf import PdfReader  # type: ignore
         except Exception as exc:
             raise HTTPException(status_code=400, detail="PDF parsing requires pypdf.") from exc
-        import io
 
         reader = PdfReader(io.BytesIO(content))
         parts: List[str] = []
@@ -987,8 +1054,17 @@ def upload_resume(file: UploadFile = File(...), authorization: Optional[str] = H
             except Exception:
                 continue
         text = "\n".join(parts).strip()
+    elif (
+        filename.lower().endswith(".docx")
+        or content_type
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ):
+        try:
+            text = _extract_docx_text(content)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use TXT or PDF.")
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, or TXT.")
 
     if len(text) < 30:
         raise HTTPException(status_code=400, detail="Resume text too short.")
