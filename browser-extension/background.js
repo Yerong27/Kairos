@@ -1,5 +1,50 @@
 const API_BASES = ["http://127.0.0.1:8000", "http://localhost:8000"];
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
+const ANALYSIS_STATE_KEY = "analysis_state";
+const ACTIVE_STATE_MAX_AGE_MS = 4 * 60 * 1000;
+const activeRequests = new Set();
+
+function enableSidePanel() {
+  if (!chrome.sidePanel || !chrome.sidePanel.setPanelBehavior) return;
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
+    console.error("Kairos side panel setup failed:", error);
+  });
+}
+
+chrome.runtime.onInstalled.addListener(enableSidePanel);
+chrome.runtime.onStartup.addListener(enableSidePanel);
+enableSidePanel();
+
+function analysisJobKey(data) {
+  const rawUrl = String((data && data.url) || "").trim();
+  if (rawUrl) {
+    try {
+      const url = new URL(rawUrl);
+      return `${url.origin}${url.pathname}`;
+    } catch (_error) {
+      return rawUrl.split("?")[0];
+    }
+  }
+  return [data && data.title, data && data.company].filter(Boolean).join("|").toLowerCase();
+}
+
+function saveAnalysisState(state) {
+  chrome.storage.local.set({
+    [ANALYSIS_STATE_KEY]: { ...state, updated_at: Date.now() },
+  });
+}
+
+function getAnalysisState(callback) {
+  chrome.storage.local.get([ANALYSIS_STATE_KEY], (result) => {
+    callback((result && result[ANALYSIS_STATE_KEY]) || null);
+  });
+}
+
+function stateIsActive(state) {
+  if (!state || !["extracting", "analyzing"].includes(state.status)) return false;
+  const updatedAt = Number(state.updated_at || state.started_at || 0);
+  return updatedAt > 0 && Date.now() - updatedAt < ACTIVE_STATE_MAX_AGE_MS;
+}
 
 function getStoredToken(cb) {
   chrome.storage.local.get(["user_token"], (result) => {
@@ -94,15 +139,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg && msg.type === "ANALYZE_CURRENT_TAB") {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs && tabs[0];
-      if (!tab || !tab.id) {
-        sendResponse({ ok: false, error: "No active tab" });
+    getAnalysisState((state) => {
+      if (stateIsActive(state)) {
+        sendResponse({ ok: true, in_progress: true, state });
         return;
       }
-      recordLastTab(tab.id);
-      injectContent(tab.id);
-      sendResponse({ ok: true });
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs && tabs[0];
+        if (!tab || !tab.id) {
+          sendResponse({ ok: false, error: "No active tab" });
+          return;
+        }
+        recordLastTab(tab.id);
+        saveAnalysisState({
+          status: "extracting",
+          title: tab.title || "Current page",
+          url: tab.url || "",
+          started_at: Date.now(),
+          message: "Reading the job page…",
+        });
+        injectContent(tab.id);
+        sendResponse({ ok: true });
+      });
     });
     return true;
   }
@@ -117,49 +175,83 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: "Notion auth required" });
       return;
     }
-    chrome.runtime.sendMessage({
-      type: "EXTRACTION_READY",
-      data: {
-        ...(msg.extraction_meta || {}),
-        title: msg.title || "",
+    const jobKey = analysisJobKey(msg);
+    getAnalysisState((existingState) => {
+      if (
+        activeRequests.has(jobKey)
+        || (stateIsActive(existingState) && existingState.job_key === jobKey && existingState.status === "analyzing")
+      ) {
+        sendResponse({ ok: true, in_progress: true });
+        return;
+      }
+
+      activeRequests.add(jobKey);
+      const stateBase = {
+        job_key: jobKey,
+        title: msg.title || "LinkedIn job",
         company: msg.company || "",
         location: msg.location || "",
-      },
-    });
-    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-    fetch(`${DEFAULT_API_BASE}/analyze_and_save`, {
-      method: "POST",
-      mode: "cors",
-      headers,
-      body: JSON.stringify({
         url: msg.url || "",
-        title: msg.title || "",
-        company: msg.company || "",
-        location: msg.location || "",
-        page_text: msg.page_text || "",
-        extraction_meta: msg.extraction_meta || {},
-        use_v3: true,
-        output_language: "en",
-      }),
-    })
-      .then(async (res) => {
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          const detail = data && data.detail ? data.detail : `Backend error (${res.status})`;
-          throw new Error(detail);
-        }
-        return data;
-      })
-      .then((data) => {
-        chrome.storage.local.set({ last_result: data });
-        chrome.runtime.sendMessage({ type: "ANALYSIS_FINISHED", ok: true, data });
-        sendResponse({ ok: true, data });
-      })
-      .catch((err) => {
-        console.error("JD Extractor error:", err);
-        chrome.runtime.sendMessage({ type: "ANALYSIS_FINISHED", ok: false, error: String(err) });
-        sendResponse({ ok: false, error: String(err) });
+        started_at: Date.now(),
+      };
+      saveAnalysisState({ ...stateBase, status: "analyzing", message: "Analyzing and saving to Notion…" });
+      chrome.runtime.sendMessage({
+        type: "EXTRACTION_READY",
+        data: {
+          ...(msg.extraction_meta || {}),
+          title: msg.title || "",
+          company: msg.company || "",
+          location: msg.location || "",
+        },
       });
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+      fetch(`${DEFAULT_API_BASE}/analyze_and_save`, {
+        method: "POST",
+        mode: "cors",
+        headers,
+        body: JSON.stringify({
+          url: msg.url || "",
+          title: msg.title || "",
+          company: msg.company || "",
+          location: msg.location || "",
+          page_text: msg.page_text || "",
+          extraction_meta: msg.extraction_meta || {},
+          use_v3: true,
+          output_language: "en",
+        }),
+      })
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const detail = data && data.detail ? data.detail : `Backend error (${res.status})`;
+            throw new Error(detail);
+          }
+          return data;
+        })
+        .then((data) => {
+          saveAnalysisState({
+            ...stateBase,
+            status: "success",
+            message: "Analysis saved to Notion.",
+            notion_url: data && data.notion_url ? data.notion_url : "",
+            score: data && data.final_score,
+            recommendation: data && data.should_apply,
+          });
+          chrome.storage.local.set({ last_result: data });
+          chrome.runtime.sendMessage({ type: "ANALYSIS_FINISHED", ok: true, data });
+          sendResponse({ ok: true, data });
+        })
+        .catch((err) => {
+          const error = String(err && err.message ? err.message : err).replace(/^Error:\s*/, "");
+          console.error("JD Extractor error:", err);
+          saveAnalysisState({ ...stateBase, status: "error", message: error });
+          chrome.runtime.sendMessage({ type: "ANALYSIS_FINISHED", ok: false, error });
+          sendResponse({ ok: false, error });
+        })
+        .finally(() => {
+          activeRequests.delete(jobKey);
+        });
+    });
   });
   return true;
 });

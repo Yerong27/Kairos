@@ -13,7 +13,9 @@
 * { box-sizing: border-box; }
 
 body {
-  width: 360px;
+  width: 100%;
+  min-width: 300px;
+  max-width: 430px;
   margin: 0;
   padding: 14px;
   color: var(--ink);

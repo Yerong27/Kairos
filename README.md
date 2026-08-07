@@ -79,11 +79,11 @@ uvicorn main:app --reload
 
 ## 使用
 
-1. 点击 Kairos Extension。
+1. 点击 Kairos 图标，打开会保持显示的 Side Panel。
 2. 连接 Notion，并在授权时选择刚复制的 `Kairos Job Tracker`。
 3. 上传 PDF、DOCX 或 TXT 简历，等待 Resume ready。
 4. 打开 LinkedIn 职位详情页。
-5. 点击 `Analyze this page`。
+5. 点击 `Analyze LinkedIn job`。分析期间可以切换标签页，进度不会丢失。
 6. 在 Notion 查看匹配分数、`Should Apply?`、要求覆盖和简历证据。
 
 更换简历时重新上传即可。相同内容的简历不会重复解析。
@@ -109,6 +109,10 @@ uvicorn main:app --reload
 ### Gemini 429
 
 Gemini 免费额度已用完。等待额度恢复，或为对应的 Google AI 项目启用付费额度。
+
+### Gemini 504
+
+Gemini 没有在服务期限内完成请求。Kairos 会保留任务状态；不要重复点击。同一 JD 已成功写入时，重试会返回原来的 Notion 页面，不会重复创建。
 
 ### PDF 无法读取
 
@@ -208,11 +212,11 @@ Open <http://127.0.0.1:8000/health>. An `ok` response means the backend is ready
 
 ## Use Kairos
 
-1. Open the Kairos extension.
+1. Select the Kairos icon to open its persistent side panel.
 2. Connect Notion and authorize the duplicated `Kairos Job Tracker` database.
 3. Upload a PDF, DOCX, or TXT resume and wait for Resume ready.
 4. Open a LinkedIn job page.
-5. Select `Analyze this page`.
+5. Select `Analyze LinkedIn job`. You can switch tabs while it runs without losing progress.
 6. Review the score, `Should Apply?`, requirement coverage, and resume evidence in Notion.
 
 Upload again whenever your resume changes. Identical resume content is reused without another resume parse.
@@ -238,6 +242,10 @@ Upload the resume again. Common causes include an invalid Gemini API key, exhaus
 ### Gemini 429
 
 The Gemini quota has been exhausted. Wait for it to reset or enable billing for the relevant Google AI project.
+
+### Gemini 504
+
+Gemini did not finish before its service deadline. Kairos keeps the task state, so do not click repeatedly. If the same JD was already delivered, retrying returns the existing Notion page instead of creating a duplicate.
 
 ### PDF cannot be read
 

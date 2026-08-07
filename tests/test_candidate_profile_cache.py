@@ -552,7 +552,7 @@ def test_job_analysis_uses_stored_profile_without_sending_raw_resume_to_jd_parse
             main, "V3_CACHE_DIR", cache_dir
         ), patch.object(main, "kairos_analyze_v3", return_value=ir) as jd_parser, patch.object(
             main, "create_notion_page", return_value="https://notion.so/page"
-        ):
+        ) as notion_writer:
             main._store_notion_user(
                 user_token="user", access_token="notion", database_id="db", database_name="Jobs"
             )
@@ -572,8 +572,21 @@ def test_job_analysis_uses_stored_profile_without_sending_raw_resume_to_jd_parse
                     "use_v3": True,
                 },
             )
+            repeated = client.post(
+                "/analyze_and_save",
+                headers={"Authorization": "Bearer user"},
+                json={
+                    "title": "API Engineer",
+                    "page_text": "Requirements: Build reliable Python APIs for production services and own delivery.",
+                    "use_v3": True,
+                },
+            )
 
         assert response.status_code == 200, response.text
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["notion_url"] == "https://notion.so/page"
+        assert jd_parser.call_count == 1
+        assert notion_writer.call_count == 1
         kwargs = jd_parser.call_args.kwargs
         assert "user_profile" not in kwargs
         assert kwargs["candidate_profile"]["candidate_skills"] == ["Python"]

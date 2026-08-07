@@ -1,14 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Kairos Job Agent",
-  "version": "0.5.2",
-  "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation"],
+  "version": "0.6.0",
+  "minimum_chrome_version": "114",
+  "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation", "sidePanel"],
   "host_permissions": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Kairos Job Agent",
-    "default_popup": "popup.html"
+    "default_title": "Open Kairos"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
   }
 }

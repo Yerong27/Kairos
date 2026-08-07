@@ -13,6 +13,40 @@ const analyzeBtn = document.getElementById("analyze-btn");
 const analyzeMsg = document.getElementById("analyze-msg");
 const notionMsg = document.getElementById("notion-msg");
 const connectBtn = document.getElementById("connect-btn");
+const ANALYSIS_STATE_KEY = "analysis_state";
+const ACTIVE_STATE_MAX_AGE_MS = 4 * 60 * 1000;
+let profileIsReady = false;
+let analysisIsRunning = false;
+
+function updateAnalyzeAvailability() {
+  analyzeBtn.disabled = !profileIsReady || analysisIsRunning;
+}
+
+function renderAnalysisState(state) {
+  if (!state || !state.status) return;
+  const role = [state.title, state.company].filter(Boolean).join(" · ");
+  const updatedAt = Number(state.updated_at || state.started_at || 0);
+  const fresh = updatedAt > 0 && Date.now() - updatedAt < ACTIVE_STATE_MAX_AGE_MS;
+  analysisIsRunning = ["extracting", "analyzing"].includes(state.status) && fresh;
+  updateAnalyzeAvailability();
+
+  if (["extracting", "analyzing"].includes(state.status) && !fresh) {
+    analyzeMsg.textContent = `${role ? `${role} — ` : ""}The previous request stopped. You can retry.`;
+  } else if (state.status === "success") {
+    const result = [state.recommendation, state.score != null ? `${state.score}/100` : ""].filter(Boolean).join(" · ");
+    analyzeMsg.textContent = `${role ? `${role} — ` : ""}Saved to Notion${result ? ` (${result})` : ""}.`;
+  } else if (state.status === "error") {
+    analyzeMsg.textContent = `${role ? `${role} — ` : ""}${state.message || "Analysis failed."}`;
+  } else {
+    analyzeMsg.textContent = `${role ? `${role} — ` : ""}${state.message || "Analyzing…"}`;
+  }
+}
+
+function restoreAnalysisState() {
+  chrome.storage.local.get([ANALYSIS_STATE_KEY], (result) => {
+    renderAnalysisState(result && result[ANALYSIS_STATE_KEY]);
+  });
+}
 
 function setTone(element, tone) {
   if (tone) element.dataset.tone = tone;
@@ -27,6 +61,7 @@ function getToken(cb) {
 }
 
 function setStatusDisconnected() {
+  profileIsReady = false;
   notionStatus.textContent = "Not connected";
   setTone(notionDot, "warning");
   dbName.textContent = "Connect to choose a database";
@@ -37,7 +72,7 @@ function setStatusDisconnected() {
   uploadMsg.textContent = "";
   analyzeMsg.textContent = "";
   uploadBtn.disabled = true;
-  analyzeBtn.disabled = true;
+  updateAnalyzeAvailability();
   connectBtn.textContent = "Connect";
   connectBtn.disabled = false;
 }
@@ -79,19 +114,23 @@ function refreshStatus() {
           if (data.resume_uploaded_at) meta.push(new Date(data.resume_uploaded_at * 1000).toLocaleDateString());
           resumeMeta.textContent = meta.join(" • ");
           uploadBtn.disabled = false;
-          analyzeBtn.disabled = !profileReady;
+          profileIsReady = profileReady;
+          updateAnalyzeAvailability();
           analyzeMsg.textContent = localFallback
             ? "AI enrichment timed out. Local resume evidence will be used; re-upload later to retry."
             : profileReady
               ? ""
               : "Re-upload the resume to create or retry its Candidate Profile.";
+          restoreAnalysisState();
         } else {
           resumeStatus.textContent = "No resume uploaded";
           setTone(resumeDot, "warning");
           resumeMeta.textContent = "PDF, DOCX, or TXT";
           uploadBtn.disabled = false;
-          analyzeBtn.disabled = true;
+          profileIsReady = false;
+          updateAnalyzeAvailability();
           analyzeMsg.textContent = "";
+          restoreAnalysisState();
         }
       })
       .catch(() => {
@@ -105,7 +144,8 @@ function refreshStatus() {
         uploadMsg.textContent = "";
         analyzeMsg.textContent = "";
         uploadBtn.disabled = true;
-        analyzeBtn.disabled = true;
+        profileIsReady = false;
+        updateAnalyzeAvailability();
       });
   });
 }
@@ -181,11 +221,17 @@ resumeFile.addEventListener("change", () => {
 });
 
 analyzeBtn.addEventListener("click", () => {
-  analyzeMsg.textContent = "Analyzing...";
+  analysisIsRunning = true;
+  updateAnalyzeAvailability();
+  analyzeMsg.textContent = "Reading the current job page…";
   chrome.runtime.sendMessage({ type: "ANALYZE_CURRENT_TAB" }, (resp) => {
-    if (resp && resp.ok) {
-      analyzeMsg.textContent = "Request sent.";
+    if (resp && resp.in_progress) {
+      renderAnalysisState(resp.state);
+    } else if (resp && resp.ok) {
+      analyzeMsg.textContent = "Reading the current job page…";
     } else {
+      analysisIsRunning = false;
+      updateAnalyzeAvailability();
       analyzeMsg.textContent = resp && resp.error ? resp.error : "Analyze failed.";
     }
   });
@@ -205,6 +251,8 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
   if (msg && msg.type === "ANALYSIS_FINISHED") {
+    analysisIsRunning = false;
+    updateAnalyzeAvailability();
     if (msg.ok) {
       analyzeMsg.textContent = msg.data && msg.data.notion_url
         ? "Analysis saved to Notion."
@@ -215,4 +263,11 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[ANALYSIS_STATE_KEY]) {
+    renderAnalysisState(changes[ANALYSIS_STATE_KEY].newValue);
+  }
+});
+
 refreshStatus();
+restoreAnalysisState();

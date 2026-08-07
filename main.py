@@ -1196,6 +1196,13 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
         if use_v3:
             request_started = time.perf_counter()
             timings_ms: Dict[str, int] = {}
+            notion_token = user.get("access_token") or NOTION_API_TOKEN
+            notion_database_id = user.get("database_id") or NOTION_DATABASE_ID
+            if not notion_database_id:
+                raise HTTPException(status_code=400, detail="No Notion database selected.")
+            delivery_scope = _sha256_text(
+                "kairos_delivery:1", user_token, _safe_str(notion_database_id)
+            )[:20]
             resume_hash = _safe_str(user.get("resume_hash")) or _sha256_text("kairos_resume:1", resume_text)
             profile_record = _get_candidate_profile_record(user_token)
             if not _candidate_profile_record_is_usable(profile_record, resume_hash):
@@ -1266,15 +1273,37 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                     hints = getattr(ir3, "evidence_hints", None)
                     if isinstance(hints, dict) and hints.get("error"):
                         error_detail = _clamp_text(_safe_str(hints.get("error")), 500)
-                    raise HTTPException(
-                        status_code=503,
-                        detail=(
-                            "Analysis was incomplete and was not written to Notion. "
-                            f"Reason: {error_detail}"
-                        ),
+                    # A duplicate request may have completed while this one was
+                    # waiting on Gemini. Reuse only a delivery confirmed for the
+                    # same user and Notion database.
+                    late_cached = _read_json_file(cache_path)
+                    late_delivery = (
+                        late_cached.get("_notion_meta")
+                        if isinstance(late_cached, dict)
+                        else None
                     )
+                    if (
+                        _cache_looks_like_contract(late_cached)
+                        and _contract_is_reliable(late_cached)
+                        and isinstance(late_delivery, dict)
+                        and late_delivery.get("scope") == delivery_scope
+                        and late_delivery.get("url")
+                    ):
+                        api_data = late_cached  # type: ignore[assignment]
+                        cache_hit = True
+                        ir3 = None
+                        score_result = None
+                        timings_ms["late_cache_recovery"] = 1
+                    else:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "Analysis was incomplete and was not written to Notion. "
+                                f"Reason: {error_detail}"
+                            ),
+                        )
 
-                if isinstance(api_data, dict):
+                if not cache_hit and isinstance(api_data, dict):
                     api_data["_job_meta"] = {
                         "job_title": getattr(ir3, "job_title", None),
                         "company": req.company or getattr(ir3, "company", None),
@@ -1457,10 +1486,21 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 )
                 print(f"[debug] dumped to: {debug_path}")
 
-            notion_token = user.get("access_token") or NOTION_API_TOKEN
-            notion_database_id = user.get("database_id") or NOTION_DATABASE_ID
-            if not notion_database_id:
-                raise HTTPException(status_code=400, detail="No Notion database selected.")
+            delivery_meta = (
+                api_data.get("_notion_meta") if isinstance(api_data, dict) else None
+            )
+            if (
+                isinstance(delivery_meta, dict)
+                and delivery_meta.get("scope") == delivery_scope
+                and delivery_meta.get("url")
+            ):
+                timings_ms["notion_write"] = 0
+                timings_ms["total"] = int(
+                    round((time.perf_counter() - request_started) * 1000)
+                )
+                response_obj.raw_json["timings_ms"] = timings_ms
+                response_obj.notion_url = _safe_str(delivery_meta.get("url"))
+                return response_obj
 
             notion_started = time.perf_counter()
             notion_url = create_notion_page(
@@ -1484,6 +1524,13 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                     ),
                 )
             response_obj.notion_url = notion_url
+            if isinstance(api_data, dict) and not KAIROS_DISABLE_CACHE:
+                api_data["_notion_meta"] = {
+                    "scope": delivery_scope,
+                    "url": notion_url,
+                    "created_at": int(time.time()),
+                }
+                _write_json_file(cache_path, api_data)
             return response_obj
 
         raise HTTPException(status_code=400, detail="v2 is disabled; set use_v3=true")
