@@ -12,7 +12,19 @@ function enableSidePanel() {
   });
 }
 
-chrome.runtime.onInstalled.addListener(enableSidePanel);
+chrome.runtime.onInstalled.addListener(() => {
+  enableSidePanel();
+  chrome.storage.local.get([ANALYSIS_STATE_KEY], (result) => {
+    const state = result && result[ANALYSIS_STATE_KEY];
+    if (state && ["extracting", "analyzing"].includes(state.status)) {
+      saveAnalysisState({
+        ...state,
+        status: "error",
+        message: "Kairos was reloaded. The previous request stopped; you can retry now.",
+      });
+    }
+  });
+});
 chrome.runtime.onStartup.addListener(enableSidePanel);
 enableSidePanel();
 
