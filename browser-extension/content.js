@@ -219,5 +219,13 @@
         if (!response || !response.ok) console.error("Kairos extraction failed:", response && response.error);
       });
     })
-    .catch((error) => console.error("Kairos LinkedIn extraction failed:", error));
+    .catch((error) => {
+      console.error("Kairos LinkedIn extraction failed:", error);
+      chrome.runtime.sendMessage({
+        type: "JD_EXTRACTION_FAILED",
+        title: document.title || "LinkedIn job",
+        url: window.location.href,
+        error: String(error && error.message ? error.message : error || "Could not extract the job page."),
+      });
+    });
 })();

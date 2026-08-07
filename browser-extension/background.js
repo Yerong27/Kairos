@@ -2,6 +2,7 @@ const API_BASES = ["http://127.0.0.1:8000", "http://localhost:8000"];
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 const ANALYSIS_STATE_KEY = "analysis_state";
 const ACTIVE_STATE_MAX_AGE_MS = 4 * 60 * 1000;
+const EXTRACTION_STATE_MAX_AGE_MS = 20 * 1000;
 const activeRequests = new Set();
 
 function enableSidePanel() {
@@ -43,7 +44,10 @@ function getAnalysisState(callback) {
 function stateIsActive(state) {
   if (!state || !["extracting", "analyzing"].includes(state.status)) return false;
   const updatedAt = Number(state.updated_at || state.started_at || 0);
-  return updatedAt > 0 && Date.now() - updatedAt < ACTIVE_STATE_MAX_AGE_MS;
+  const maxAge = state.status === "extracting"
+    ? EXTRACTION_STATE_MAX_AGE_MS
+    : ACTIVE_STATE_MAX_AGE_MS;
+  return updatedAt > 0 && Date.now() - updatedAt < maxAge;
 }
 
 function getStoredToken(cb) {
@@ -80,10 +84,18 @@ function getLastTab(cb) {
 }
 
 function injectContent(tabId) {
-  chrome.scripting.executeScript({
+  return chrome.scripting.executeScript({
     target: { tabId },
     files: ["content.js"],
   });
+}
+
+function readableInjectionError(error) {
+  const detail = String(error && error.message ? error.message : error || "");
+  if (/cannot access|permission|host/i.test(detail)) {
+    return "Kairos could not access this LinkedIn tab. Reload the extension, then reopen the job page.";
+  }
+  return detail ? `Could not read the job page: ${detail}` : "Could not read the job page.";
 }
 
 function openNotionStart() {
@@ -150,18 +162,47 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: false, error: "No active tab" });
           return;
         }
+        if (!/^https:\/\/www\.linkedin\.com\/jobs\//i.test(String(tab.url || ""))) {
+          const error = "Open a LinkedIn job page before analyzing.";
+          saveAnalysisState({
+            status: "error",
+            title: tab.title || "Current page",
+            url: tab.url || "",
+            message: error,
+          });
+          sendResponse({ ok: false, error });
+          return;
+        }
         recordLastTab(tab.id);
-        saveAnalysisState({
+        const extractionState = {
           status: "extracting",
           title: tab.title || "Current page",
           url: tab.url || "",
           started_at: Date.now(),
           message: "Reading the job page…",
-        });
-        injectContent(tab.id);
-        sendResponse({ ok: true });
+        };
+        saveAnalysisState(extractionState);
+        injectContent(tab.id)
+          .then(() => sendResponse({ ok: true }))
+          .catch((error) => {
+            const message = readableInjectionError(error);
+            saveAnalysisState({ ...extractionState, status: "error", message });
+            sendResponse({ ok: false, error: message });
+          });
       });
     });
+    return true;
+  }
+
+  if (msg && msg.type === "JD_EXTRACTION_FAILED") {
+    const error = String(msg.error || "Could not extract the LinkedIn job description.");
+    saveAnalysisState({
+      status: "error",
+      title: msg.title || "LinkedIn job",
+      url: msg.url || "",
+      message: error,
+    });
+    sendResponse({ ok: false, error });
     return true;
   }
 

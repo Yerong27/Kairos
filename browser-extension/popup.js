@@ -15,8 +15,10 @@ const notionMsg = document.getElementById("notion-msg");
 const connectBtn = document.getElementById("connect-btn");
 const ANALYSIS_STATE_KEY = "analysis_state";
 const ACTIVE_STATE_MAX_AGE_MS = 4 * 60 * 1000;
+const EXTRACTION_STATE_MAX_AGE_MS = 20 * 1000;
 let profileIsReady = false;
 let analysisIsRunning = false;
+let analysisStateTimer = null;
 
 function updateAnalyzeAvailability() {
   analyzeBtn.disabled = !profileIsReady || analysisIsRunning;
@@ -24,14 +26,21 @@ function updateAnalyzeAvailability() {
 
 function renderAnalysisState(state) {
   if (!state || !state.status) return;
+  if (analysisStateTimer) {
+    clearTimeout(analysisStateTimer);
+    analysisStateTimer = null;
+  }
   const role = [state.title, state.company].filter(Boolean).join(" · ");
   const updatedAt = Number(state.updated_at || state.started_at || 0);
-  const fresh = updatedAt > 0 && Date.now() - updatedAt < ACTIVE_STATE_MAX_AGE_MS;
+  const maxAge = state.status === "extracting"
+    ? EXTRACTION_STATE_MAX_AGE_MS
+    : ACTIVE_STATE_MAX_AGE_MS;
+  const fresh = updatedAt > 0 && Date.now() - updatedAt < maxAge;
   analysisIsRunning = ["extracting", "analyzing"].includes(state.status) && fresh;
   updateAnalyzeAvailability();
 
   if (["extracting", "analyzing"].includes(state.status) && !fresh) {
-    analyzeMsg.textContent = `${role ? `${role} — ` : ""}The previous request stopped. You can retry.`;
+    analyzeMsg.textContent = `${role ? `${role} — ` : ""}${state.status === "extracting" ? "Kairos could not read the page." : "The previous request stopped."} You can retry.`;
   } else if (state.status === "success") {
     const result = [state.recommendation, state.score != null ? `${state.score}/100` : ""].filter(Boolean).join(" · ");
     analyzeMsg.textContent = `${role ? `${role} — ` : ""}Saved to Notion${result ? ` (${result})` : ""}.`;
@@ -39,6 +48,11 @@ function renderAnalysisState(state) {
     analyzeMsg.textContent = `${role ? `${role} — ` : ""}${state.message || "Analysis failed."}`;
   } else {
     analyzeMsg.textContent = `${role ? `${role} — ` : ""}${state.message || "Analyzing…"}`;
+  }
+
+  if (analysisIsRunning) {
+    const remaining = Math.max(50, maxAge - (Date.now() - updatedAt) + 50);
+    analysisStateTimer = setTimeout(() => renderAnalysisState(state), remaining);
   }
 }
 
