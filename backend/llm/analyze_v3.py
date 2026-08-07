@@ -568,6 +568,7 @@ RE_JUNIOR_GROWTH = re.compile(
     r"learn(?:ing)?\s+(?:from\s+)?(?:senior\s+engineers|seniors)|"
     r"learn(?:ing)?\s+(?:system\s+design|architecture|distributed\s+systems)|"
     r"under\s+(?:the\s+)?guidance\s+of|"
+    r"under\s+(?:the\s+)?technical\s+direction\s+of\s+(?:more\s+)?senior\s+(?:engineers|staff)|"
     r"with\s+(?:the\s+)?guidance\s+from|"
     r"mentored\s+by|"
     r"training\s+(?:program|track|rotation)|"
@@ -582,7 +583,6 @@ RE_JUNIOR_GROWTH = re.compile(
 
 RE_STRONG_SENIOR_ONLY = re.compile(
     r"\b("
-    r"staff\s+engineer|principal\s+engineer|lead\s+engineer|"
     r"own(?:ing)?\s+(?:the\s+)?architecture|architecture\s+ownership|"
     r"set\s+(?:the\s+)?technical\s+direction|"
     r"drive\s+(?:org|organization)[- ]wide|"
@@ -1502,6 +1502,11 @@ def _extract_seniority_rules(text: str) -> int:
     """
     t = text.lower()
 
+    # Growth/subordination language describes the target role directly and
+    # takes precedence over senior titles belonging to collaborators.
+    if RE_JUNIOR_GROWTH.search(t) or RE_APPRENTICE.search(t):
+        return 0
+
     # Lev 3: Org/Multi-Team Impact
     if RE_STRONG_SENIOR_ONLY.search(t):
         return 3
@@ -1512,9 +1517,6 @@ def _extract_seniority_rules(text: str) -> int:
 
     # Lev 1: Mid/Execution (Default if standard keywords exist)
     # Lev 0: Junior/Intern
-    if RE_JUNIOR_GROWTH.search(t) or RE_APPRENTICE.search(t):
-        return 0
-
     return 1 # Default mid
 
 
@@ -1956,6 +1958,36 @@ def _title_seniority_hint(final_job_title: str, page_text_orig: str) -> Tuple[Se
     return "unknown", "", "no_title_hint"
 
 
+def _explicit_experience_range(value: str) -> Optional[Tuple[int, int]]:
+    """Return an explicit numeric year range without inferring from prose."""
+    match = re.search(
+        r"\b(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s+years?\b",
+        str(value or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    lower, upper = int(match.group(1)), int(match.group(2))
+    if lower > upper or upper > 40:
+        return None
+    return lower, upper
+
+
+def _structured_seniority_levels(ownership_and_scope: Any) -> Tuple[int, int, int]:
+    data = ownership_and_scope if isinstance(ownership_and_scope, dict) else {}
+
+    def level(name: str) -> int:
+        item = data.get(name)
+        if not isinstance(item, dict):
+            return 0
+        try:
+            return max(0, min(3, int(item.get("level_val", 0) or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    return level("ownership"), level("scope"), level("leadership")
+
+
 def _revised_seniority_decision(
     *,
     llm_label: SeniorityLabel,
@@ -1963,11 +1995,22 @@ def _revised_seniority_decision(
     page_text_flat_lower: str,
     page_text_orig: str,
     final_job_title: str,
+    ownership_and_scope: Any = None,
+    years_experience: str = "",
 ) -> Tuple[SeniorityLabel, str, bool, str, Dict[str, bool]]:
+    ownership_level, scope_level, leadership_level = _structured_seniority_levels(
+        ownership_and_scope
+    )
+    experience_range = _explicit_experience_range(years_experience)
     signals: Dict[str, bool] = {
         "has_junior_growth": RE_JUNIOR_GROWTH.search(page_text_flat_lower) is not None,
         "has_strong_senior_only": RE_STRONG_SENIOR_ONLY.search(page_text_flat_lower) is not None,
         "has_generic_resp": RE_SENIOR_RESPONSIBILITY.search(page_text_flat_lower) is not None,
+        "has_early_experience_range": bool(
+            experience_range and experience_range[0] <= 1 and experience_range[1] <= 3
+        ),
+        "has_structured_leadership": leadership_level >= 2,
+        "has_system_ownership": ownership_level >= 3,
     }
 
     title_hint_label, title_hint_quote, title_hint_reason = _title_seniority_hint(final_job_title, page_text_orig)
@@ -1978,30 +2021,56 @@ def _revised_seniority_decision(
             return title_hint_label, title_hint_quote, True, title_hint_reason, signals
         return llm_label, "", False, "keep_llm_title_agrees", signals
 
+    early_career_context = bool(
+        signals["has_junior_growth"] or signals["has_early_experience_range"]
+    )
+
+    def apply_experience_cap(
+        label: SeniorityLabel, quote: str, override: bool, reason: str
+    ) -> Tuple[SeniorityLabel, str, bool, str, Dict[str, bool]]:
+        # A bounded 1–3 year requirement cannot support a senior/lead override
+        # unless the job title itself explicitly says so (handled above).
+        if experience_range and experience_range[1] <= 3 and label in ("senior", "lead", "principal"):
+            capped: SeniorityLabel = "junior" if signals["has_junior_growth"] else "mid"
+            return capped, quote, True, "cap_by_explicit_early_career_range", signals
+        return label, quote, override, reason, signals
+
     if llm_label in _ALLOWED_SENIORITY and llm_label != "unknown":
-        if llm_label in ("senior", "lead") and signals["has_junior_growth"]:
+        if llm_label in ("senior", "lead") and early_career_context:
             q = _find_first_match_quote(page_text_orig, RE_JUNIOR_GROWTH, "learn")
-            return "junior", q, True, "downgrade_senior_due_to_growth_cues", signals
+            return apply_experience_cap(
+                "junior", q, True, "downgrade_senior_due_to_early_career_context"
+            )
 
         if llm_label in ("intern", "junior", "mid") and signals["has_strong_senior_only"]:
-            q = _find_first_match_quote(page_text_orig, RE_STRONG_SENIOR_ONLY, "technical direction")
-            if re.search(r"\b(staff|principal|lead)\b", page_text_flat_lower):
-                return "lead", q, True, "upgrade_due_to_strong_senior_only", signals
-            return "senior", q, True, "upgrade_due_to_strong_senior_only", signals
+            # Raw phrases are insufficient by themselves: they may describe a
+            # manager or collaborator. Upgrade only when structured ownership
+            # says the target role leads people or owns a whole system.
+            if leadership_level >= 2 or ownership_level >= 3:
+                q = _find_first_match_quote(page_text_orig, RE_STRONG_SENIOR_ONLY)
+                upgraded: SeniorityLabel = "lead" if leadership_level >= 2 else "senior"
+                return apply_experience_cap(
+                    upgraded, q, True, "upgrade_supported_by_structured_scope"
+                )
+            return llm_label, "", False, "keep_llm_unowned_senior_reference", signals
 
         if llm_evidence_ok:
-            return llm_label, "", False, "keep_llm_evidence_ok", signals
-        return llm_label, "", False, "llm_no_evidence_fallback", signals
+            return apply_experience_cap(llm_label, "", False, "keep_llm_evidence_ok")
+        return apply_experience_cap(llm_label, "", False, "keep_llm_semantic_label")
 
-    if signals["has_strong_senior_only"]:
-        q = _find_first_match_quote(page_text_orig, RE_STRONG_SENIOR_ONLY, "technical direction")
-        if re.search(r"\b(staff|principal|lead)\b", page_text_flat_lower):
-            return "lead", q, True, "heuristic_strong_senior_only", signals
-        return "senior", q, True, "heuristic_strong_senior_only", signals
-
-    if signals["has_junior_growth"]:
+    if early_career_context:
         q = _find_first_match_quote(page_text_orig, RE_JUNIOR_GROWTH, "learn")
-        return "junior", q, True, "heuristic_junior_growth", signals
+        return "junior", q, True, "heuristic_early_career_context", signals
+
+    if leadership_level >= 2:
+        q = _find_first_match_quote(page_text_orig, RE_STRONG_SENIOR_ONLY)
+        return apply_experience_cap("lead", q, True, "heuristic_structured_leadership")
+
+    if ownership_level >= 3 or (
+        ownership_level >= 2 and scope_level >= 2 and signals["has_strong_senior_only"]
+    ):
+        q = _find_first_match_quote(page_text_orig, RE_STRONG_SENIOR_ONLY)
+        return apply_experience_cap("senior", q, True, "heuristic_structured_ownership")
 
     if signals["has_generic_resp"]:
         q = _find_first_match_quote(page_text_orig, RE_SENIOR_RESPONSIBILITY, "architecture")
@@ -2458,6 +2527,17 @@ def analyze_v3(
         j_sen_evidence = ""
 
     llm_label: SeniorityLabel = j_sen_raw if j_sen_raw in _ALLOWED_SENIORITY else "unknown"  # type: ignore
+    raw_ownership_and_scope = (
+        job.get("ownership_and_scope")
+        or raw.get("ownership_and_scope")
+        or {}
+    )
+    raw_evidence_hints = job.get("evidence_hints") or raw.get("evidence_hints") or {}
+    years_experience_hint = (
+        str(raw_evidence_hints.get("years_experience") or "")
+        if isinstance(raw_evidence_hints, dict)
+        else ""
+    )
 
     final_label, inferred_quote, override_applied, override_reason, signals = _revised_seniority_decision(
         llm_label=llm_label,
@@ -2465,6 +2545,8 @@ def analyze_v3(
         page_text_flat_lower=page_text_flat_lower,
         page_text_orig=page_text_orig,
         final_job_title=final_job_title,
+        ownership_and_scope=raw_ownership_and_scope,
+        years_experience=years_experience_hint,
     )
 
     job_seniority_signal: SeniorityLabel = final_label

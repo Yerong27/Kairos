@@ -1,7 +1,11 @@
 import time
 
 from backend.ir.schema_v3 import AnalyzeIRv3
-from backend.llm.analyze_v3 import _derive_candidate_level_from_experience
+from backend.llm.analyze_v3 import (
+    _derive_candidate_level_from_experience,
+    _extract_seniority_rules,
+    _revised_seniority_decision,
+)
 from backend.scoring.scoring_engine_v3 import score_ir_v3, score_to_public_dict
 
 
@@ -115,3 +119,75 @@ def test_junior_to_mid_band_uses_numeric_half_step():
     contract = score_to_public_dict(result)
     seniority_layer = next(layer for layer in contract["layers"] if layer["id"] == "seniority")
     assert seniority_layer["meta"]["candidate_level"] == "junior_to_mid"
+
+
+def test_collaborator_lead_title_does_not_promote_early_career_role():
+    jd = """
+AI Enablement Analyst
+You bring 1–3 years of experience, including substantial personal projects.
+Contribute to design discussions under the technical direction of more senior engineers.
+Work closely with the AI Enablement Lead Engineer and internal users.
+"""
+
+    level, _quote, overridden, reason, signals = _revised_seniority_decision(
+        llm_label="junior",
+        llm_evidence_ok=False,
+        page_text_flat_lower=" ".join(jd.lower().split()),
+        page_text_orig=jd,
+        final_job_title="AI Enablement Analyst",
+        ownership_and_scope={
+            "ownership": {"level_val": 1},
+            "scope": {"level_val": 2},
+            "leadership": {"level_val": 0},
+        },
+        years_experience="1-3 years of software engineering experience",
+    )
+
+    assert level == "junior"
+    assert overridden is False
+    assert reason == "keep_llm_semantic_label"
+    assert signals["has_junior_growth"] is True
+    assert _extract_seniority_rules(jd) == 0
+
+
+def test_direct_team_lead_scope_can_upgrade_an_underspecified_model_label():
+    jd = "Lead a team, set technical direction, and own the architecture for the service."
+
+    level, _quote, overridden, reason, _signals = _revised_seniority_decision(
+        llm_label="mid",
+        llm_evidence_ok=False,
+        page_text_flat_lower=" ".join(jd.lower().split()),
+        page_text_orig=jd,
+        final_job_title="Engineering Manager",
+        ownership_and_scope={
+            "ownership": {"level_val": 3},
+            "scope": {"level_val": 3},
+            "leadership": {"level_val": 2},
+        },
+    )
+
+    assert level == "lead"
+    assert overridden is True
+    assert reason == "upgrade_supported_by_structured_scope"
+
+
+def test_explicit_short_experience_range_caps_unsupported_senior_override():
+    jd = "Own the architecture while working under the guidance of senior engineers."
+
+    level, _quote, overridden, reason, _signals = _revised_seniority_decision(
+        llm_label="senior",
+        llm_evidence_ok=False,
+        page_text_flat_lower=" ".join(jd.lower().split()),
+        page_text_orig=jd,
+        final_job_title="Software Analyst",
+        ownership_and_scope={
+            "ownership": {"level_val": 1},
+            "scope": {"level_val": 1},
+            "leadership": {"level_val": 0},
+        },
+        years_experience="1–3 years",
+    )
+
+    assert level == "junior"
+    assert overridden is True
+    assert reason == "downgrade_senior_due_to_early_career_context"

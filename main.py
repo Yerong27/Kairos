@@ -1226,7 +1226,7 @@ def analyze_and_save(req: AnalyzeRequest, authorization: Optional[str] = Header(
                 ) from exc
 
             cache_key = _sha256_text(
-                "kairos_v3_public:2.7",
+                "kairos_v3_public:2.8",
                 _canonical_jd_for_cache(req.page_text or ""),
                 resume_hash,
                 CANDIDATE_PROFILE_MODEL,
