@@ -48,8 +48,17 @@
               <span id="resume-meta"></span>
             </div>
           </div>
-          <input type="file" id="resume-file" accept=".pdf,.docx,.txt" class="file-input" />
-          <button id="upload-btn" class="button secondary compact-action" type="button">Choose file</button>
+        </div>
+        <input type="file" id="resume-file" accept=".pdf,.docx,.txt" class="file-input" />
+        <div class="file-picker" aria-label="Resume upload controls">
+          <div class="selected-file">
+            <span class="file-icon" aria-hidden="true">↥</span>
+            <span id="selected-file-name">No file selected</span>
+          </div>
+          <div class="file-actions">
+            <button id="choose-btn" class="button secondary" type="button">Choose file</button>
+            <button id="upload-btn" class="button primary" type="button" disabled>Upload resume</button>
+          </div>
         </div>
         <div id="upload-msg" class="message" aria-live="polite"></div>
       </section>

@@ -6,9 +6,11 @@ const dbName = document.getElementById("db-name");
 const resumeStatus = document.getElementById("resume-status");
 const resumeDot = document.getElementById("resume-dot");
 const resumeMeta = document.getElementById("resume-meta");
+const chooseBtn = document.getElementById("choose-btn");
 const uploadBtn = document.getElementById("upload-btn");
 const uploadMsg = document.getElementById("upload-msg");
 const resumeFile = document.getElementById("resume-file");
+const selectedFileName = document.getElementById("selected-file-name");
 const analyzeBtn = document.getElementById("analyze-btn");
 const analyzeMsg = document.getElementById("analyze-msg");
 const notionMsg = document.getElementById("notion-msg");
@@ -19,9 +21,21 @@ const EXTRACTION_STATE_MAX_AGE_MS = 20 * 1000;
 let profileIsReady = false;
 let analysisIsRunning = false;
 let analysisStateTimer = null;
+let notionIsConnected = false;
+let uploadIsRunning = false;
 
 function updateAnalyzeAvailability() {
   analyzeBtn.disabled = !profileIsReady || analysisIsRunning;
+}
+
+function selectedResume() {
+  return resumeFile.files && resumeFile.files[0] ? resumeFile.files[0] : null;
+}
+
+function updateResumeActions() {
+  chooseBtn.disabled = !notionIsConnected || uploadIsRunning;
+  resumeFile.disabled = !notionIsConnected || uploadIsRunning;
+  uploadBtn.disabled = !notionIsConnected || uploadIsRunning || !selectedResume();
 }
 
 function renderAnalysisState(state) {
@@ -56,9 +70,26 @@ function renderAnalysisState(state) {
   }
 }
 
-function restoreAnalysisState() {
+function restoreAnalysisState(fallbackMessage = "") {
   chrome.storage.local.get([ANALYSIS_STATE_KEY], (result) => {
-    renderAnalysisState(result && result[ANALYSIS_STATE_KEY]);
+    const state = result && result[ANALYSIS_STATE_KEY];
+    if (state) renderAnalysisState(state);
+    else if (fallbackMessage) analyzeMsg.textContent = fallbackMessage;
+  });
+}
+
+function resetAnalysisForResume() {
+  if (analysisStateTimer) {
+    clearTimeout(analysisStateTimer);
+    analysisStateTimer = null;
+  }
+  analysisIsRunning = false;
+  updateAnalyzeAvailability();
+  return new Promise((resolve) => {
+    chrome.storage.local.remove([ANALYSIS_STATE_KEY, "last_result"], () => {
+      analyzeMsg.textContent = "Resume updated. Open a LinkedIn job page, then select Analyze.";
+      resolve();
+    });
   });
 }
 
@@ -75,6 +106,7 @@ function getToken(cb) {
 }
 
 function setStatusDisconnected() {
+  notionIsConnected = false;
   profileIsReady = false;
   notionStatus.textContent = "Not connected";
   setTone(notionDot, "warning");
@@ -85,7 +117,7 @@ function setStatusDisconnected() {
   notionMsg.textContent = "";
   uploadMsg.textContent = "";
   analyzeMsg.textContent = "";
-  uploadBtn.disabled = true;
+  updateResumeActions();
   updateAnalyzeAvailability();
   connectBtn.textContent = "Connect";
   connectBtn.disabled = false;
@@ -108,6 +140,7 @@ function refreshStatus() {
         return res.json();
       })
       .then((data) => {
+        notionIsConnected = Boolean(data.notion_connected);
         notionStatus.textContent = data.notion_connected ? "Connected" : "Not connected";
         setTone(notionDot, data.notion_connected ? "success" : "warning");
         dbName.textContent = data.database_name || "No database selected";
@@ -127,27 +160,26 @@ function refreshStatus() {
           if (data.resume_filename) meta.push(data.resume_filename);
           if (data.resume_uploaded_at) meta.push(new Date(data.resume_uploaded_at * 1000).toLocaleDateString());
           resumeMeta.textContent = meta.join(" • ");
-          uploadBtn.disabled = false;
+          updateResumeActions();
           profileIsReady = profileReady;
           updateAnalyzeAvailability();
-          analyzeMsg.textContent = localFallback
-            ? "AI enrichment timed out. Local resume evidence will be used; re-upload later to retry."
-            : profileReady
-              ? ""
-              : "Re-upload the resume to create or retry its Candidate Profile.";
-          restoreAnalysisState();
+          if (profileReady) {
+            restoreAnalysisState("Ready for a new analysis. Open a LinkedIn job page first.");
+          } else {
+            analyzeMsg.textContent = "Re-upload the resume to create or retry its Candidate Profile.";
+          }
         } else {
           resumeStatus.textContent = "No resume uploaded";
           setTone(resumeDot, "warning");
           resumeMeta.textContent = "PDF, DOCX, or TXT";
-          uploadBtn.disabled = false;
+          updateResumeActions();
           profileIsReady = false;
           updateAnalyzeAvailability();
-          analyzeMsg.textContent = "";
-          restoreAnalysisState();
+          analyzeMsg.textContent = "Upload a resume before analyzing a job.";
         }
       })
       .catch(() => {
+        notionIsConnected = false;
         notionStatus.textContent = "Backend offline";
         setTone(notionDot, "error");
         setTone(resumeDot, "error");
@@ -157,7 +189,7 @@ function refreshStatus() {
         notionMsg.textContent = "";
         uploadMsg.textContent = "";
         analyzeMsg.textContent = "";
-        uploadBtn.disabled = true;
+        updateResumeActions();
         profileIsReady = false;
         updateAnalyzeAvailability();
       });
@@ -170,21 +202,22 @@ connectBtn.addEventListener("click", () => {
 
 function uploadSelectedResume() {
   uploadMsg.textContent = "";
-  const file = resumeFile.files && resumeFile.files[0];
+  const file = selectedResume();
+  let uploadWasSaved = false;
   if (!file) {
+    uploadMsg.textContent = "Choose a resume file first.";
     return;
   }
-  uploadBtn.disabled = true;
+  uploadIsRunning = true;
   uploadBtn.textContent = "Creating profile…";
-  resumeFile.disabled = true;
-  resumeMeta.textContent = file.name;
+  updateResumeActions();
 
   getToken((token) => {
     if (!token) {
       uploadMsg.textContent = "Connect Notion first.";
-      uploadBtn.disabled = false;
-      uploadBtn.textContent = "Choose file";
-      resumeFile.disabled = false;
+      uploadIsRunning = false;
+      uploadBtn.textContent = "Upload resume";
+      updateResumeActions();
       return;
     }
     const form = new FormData();
@@ -200,7 +233,8 @@ function uploadSelectedResume() {
         if (!res.ok) throw new Error(data.detail || `Upload failed (${res.status})`);
         return data;
       })
-      .then((data) => {
+      .then(async (data) => {
+        uploadWasSaved = Boolean(data && data.status === "saved");
         if (!data || data.status !== "saved") {
           uploadMsg.textContent = "Upload failed.";
         } else if (data.candidate_profile_status === "ready") {
@@ -212,27 +246,38 @@ function uploadSelectedResume() {
         } else {
           uploadMsg.textContent = data.warning || "Resume saved, but Candidate Profile creation failed. Re-upload to retry.";
         }
+        if (data && data.status === "saved" && (data.resume_changed || data.candidate_profile_reused === false)) {
+          await resetAnalysisForResume();
+        }
         refreshStatus();
       })
       .catch((err) => {
         uploadMsg.textContent = err.message || "Upload failed.";
       })
       .finally(() => {
-        uploadBtn.disabled = false;
-        uploadBtn.textContent = "Choose file";
-        resumeFile.disabled = false;
-        resumeFile.value = "";
+        uploadIsRunning = false;
+        uploadBtn.textContent = "Upload resume";
+        if (uploadWasSaved) {
+          resumeFile.value = "";
+          selectedFileName.textContent = "No file selected";
+        }
+        updateResumeActions();
       });
   });
 }
 
-uploadBtn.addEventListener("click", () => {
+chooseBtn.addEventListener("click", () => {
   resumeFile.click();
 });
 
 resumeFile.addEventListener("change", () => {
-  uploadSelectedResume();
+  const file = selectedResume();
+  selectedFileName.textContent = file ? file.name : "No file selected";
+  uploadMsg.textContent = file ? "Ready to upload. Your current resume remains active until you confirm." : "";
+  updateResumeActions();
 });
+
+uploadBtn.addEventListener("click", uploadSelectedResume);
 
 analyzeBtn.addEventListener("click", () => {
   analysisIsRunning = true;

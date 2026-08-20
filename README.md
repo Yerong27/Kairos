@@ -81,7 +81,7 @@ uvicorn main:app --reload
 
 1. 点击 Kairos 图标，打开会保持显示的 Side Panel。
 2. 连接 Notion，并在授权时选择刚复制的 `Kairos Job Tracker`。
-3. 上传 PDF、DOCX 或 TXT 简历，等待 Resume ready。
+3. 点击 `Choose file` 选择 PDF、DOCX 或 TXT 简历，再点击 `Upload resume`，等待 Resume ready。
 4. 打开 LinkedIn 职位详情页。
 5. 点击 `Analyze LinkedIn job`。分析期间可以切换标签页，进度不会丢失。
 6. 在 Notion 查看匹配分数、`Should Apply?`、要求覆盖和简历证据。
@@ -214,7 +214,7 @@ Open <http://127.0.0.1:8000/health>. An `ok` response means the backend is ready
 
 1. Select the Kairos icon to open its persistent side panel.
 2. Connect Notion and authorize the duplicated `Kairos Job Tracker` database.
-3. Upload a PDF, DOCX, or TXT resume and wait for Resume ready.
+3. Select a PDF, DOCX, or TXT resume with `Choose file`, then select `Upload resume` and wait for Resume ready.
 4. Open a LinkedIn job page.
 5. Select `Analyze LinkedIn job`. You can switch tabs while it runs without losing progress.
 6. Review the score, `Should Apply?`, requirement coverage, and resume evidence in Notion.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kairos Job Agent",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "minimum_chrome_version": "114",
   "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation", "sidePanel"],
   "host_permissions": [
