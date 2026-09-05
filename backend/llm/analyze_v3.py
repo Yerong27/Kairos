@@ -66,8 +66,21 @@ from backend.ir.canonicalize import canon_tool
 # =============================
 # Gemini setup
 # =============================
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int((os.getenv(name) or str(default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 JOB_ANALYSIS_MODEL = (os.getenv("GEMINI_JOB_MODEL") or "gemini-3.5-flash").strip()
-JOB_ANALYSIS_TIMEOUT_SECONDS = 60
+# A requirement-heavy structured response regularly needs more than 60 seconds
+# on the free tier. One longer request is both more reliable and cheaper than
+# sending the same prompt again after a client-side deadline.
+JOB_ANALYSIS_TIMEOUT_SECONDS = max(
+    60,
+    _env_int("GEMINI_JOB_TIMEOUT_SECONDS", 120),
+)
 JOB_ANALYSIS_MAX_ATTEMPTS = 2
 JOB_ANALYSIS_MAX_QUOTA_WAIT_SECONDS = 30.0
 CATALOG_DIR = pathlib.Path(__file__).parent.parent / "config" / "catalogs"
@@ -1350,8 +1363,7 @@ OUTPUT LANGUAGE: {output_language}
     rule_seniority = _extract_seniority_rules(page_text)
 
     try:
-        transient_errors = (
-            google_api_exceptions.DeadlineExceeded,
+        retryable_service_errors = (
             google_api_exceptions.GatewayTimeout,
             google_api_exceptions.BadGateway,
             google_api_exceptions.ServiceUnavailable,
@@ -1374,7 +1386,12 @@ OUTPUT LANGUAGE: {output_language}
                 ):
                     raise
                 time.sleep(delay + 0.25)
-            except transient_errors:
+            except google_api_exceptions.DeadlineExceeded:
+                # Retrying the same large prompt immediately costs another API
+                # request and usually reaches the same deadline. The single
+                # request above already has a deliberately longer deadline.
+                raise
+            except retryable_service_errors:
                 if attempt + 1 >= JOB_ANALYSIS_MAX_ATTEMPTS:
                     raise
                 time.sleep(0.75)
@@ -1485,6 +1502,13 @@ OUTPUT LANGUAGE: {output_language}
 
     except Exception as e:
         print(f"Gemini V3 Extraction Error/Degraded: {e}")
+        error_detail = str(e)
+        if isinstance(e, google_api_exceptions.DeadlineExceeded):
+            error_detail = (
+                f"Gemini did not finish the JD analysis within "
+                f"{JOB_ANALYSIS_TIMEOUT_SECONDS} seconds. No duplicate retry was sent; "
+                "try Analyze again after a short wait."
+            )
         # Return a "Degraded" IR instead of empty dict
         # This prevents silent failure (Run 0 domains)
         return AnalyzeIRv3(
@@ -1492,7 +1516,7 @@ OUTPUT LANGUAGE: {output_language}
             company="Unknown",
             job_seniority_signal="unknown",
             analysis_status="degraded",
-            evidence_hints={"error": str(e)}
+            evidence_hints={"error": error_detail}
         ).model_dump()
 
 
