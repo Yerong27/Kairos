@@ -112,3 +112,37 @@ def test_validation_error_uses_title_and_reduced_core_blocks():
     assert len(calls[0]["children"]) > 24
     assert len(calls[1]["children"]) == 24
     assert set(calls[1]["properties"]) == {"Job Title"}
+
+
+def test_requirement_matrix_keeps_all_compact_actions():
+    actions = [f"Complete action {index}" for index in range(12)]
+    contract = {
+        "requirements": {
+            "items": [
+                {
+                    "name": "Example requirement",
+                    "importance": "should",
+                    "status": "matched",
+                    "jd_evidence": "Example evidence",
+                }
+            ],
+            "counts": {"total": 1, "matched": 1},
+        },
+        "analysis_quality": {"score_reliable": True},
+        "actions": actions,
+    }
+    resp = SimpleNamespace(
+        distance_score=80,
+        final_score=80,
+        seniority_gap="none",
+        cap=92,
+    )
+
+    blocks = writer._render_requirement_matrix_to_notion(contract, resp)
+    rendered = [
+        block["bulleted_list_item"]["rich_text"][0]["text"]["content"]
+        for block in blocks
+        if block.get("type") == "bulleted_list_item"
+    ]
+
+    assert actions == [item for item in rendered if item.startswith("Complete action")]

@@ -23,6 +23,15 @@ from backend.ir.candidate_profile import CandidateEvidenceClaim
 # -----------------------------
 Importance = Literal["must", "should", "nice_to_have", "nice", "unknown"]
 SeniorityLabel = Literal["intern", "junior", "mid", "senior", "lead", "principal", "unknown"]
+SeniorityBasis = Literal[
+    "explicit_title",
+    "explicit_experience",
+    "individual_execution",
+    "system_ownership",
+    "people_leadership",
+    "organizational_scope",
+    "unclear",
+]
 
 # lightweight domain facet for explainability / safer importance rules
 DomainFacet = Literal["technical", "process", "people", "unknown"]
@@ -169,6 +178,9 @@ class AnalyzeIRv3(BaseModel):
     location: Optional[str] = None
 
     job_seniority_signal: SeniorityLabel
+    job_seniority_basis: SeniorityBasis = "unclear"
+    job_seniority_evidence_ids: List[str] = Field(default_factory=list)
+    job_seniority_evidence: Optional[str] = None
     candidate_seniority_signal: Optional[str] = Field(description="Verbatim title-like string from candidate profile", default="N/A")
 
     candidate_skills: List[str] = Field(default_factory=list, description="Extracted candidate skills")
@@ -209,6 +221,7 @@ class AnalyzeIRv3(BaseModel):
 __all__ = [
     "Importance",
     "SeniorityLabel",
+    "SeniorityBasis",
     "DomainFacet",
     "RequirementType",
     "MatchStatus",

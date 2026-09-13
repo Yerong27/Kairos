@@ -191,3 +191,50 @@ def test_explicit_short_experience_range_caps_unsupported_senior_override():
     assert level == "junior"
     assert overridden is True
     assert reason == "downgrade_senior_due_to_early_career_context"
+
+
+def test_unsupported_model_senior_label_becomes_unknown_not_mid():
+    jd = """
+AI Product Engineer
+Rapidly prototype product concepts and assess technical feasibility.
+Work with the Product Lead and Data Scientist to test solution options.
+"""
+
+    level, quote, overridden, reason, signals = _revised_seniority_decision(
+        llm_label="senior",
+        llm_evidence_ok=False,
+        llm_basis="unclear",
+        page_text_flat_lower=" ".join(jd.lower().split()),
+        page_text_orig=jd,
+        final_job_title="AI Product Engineer",
+        ownership_and_scope={
+            "ownership": {"level_val": 1},
+            "scope": {"level_val": 1},
+            "leadership": {"level_val": 0},
+        },
+    )
+
+    assert level == "unknown"
+    assert quote == ""
+    assert overridden is True
+    assert reason == "unsupported_high_seniority_without_grounded_basis"
+    assert signals["has_grounded_seniority_basis"] is False
+
+
+def test_grounded_system_ownership_can_support_senior_label():
+    jd = "Own the platform end to end and remain accountable for production outcomes."
+
+    level, _quote, overridden, reason, signals = _revised_seniority_decision(
+        llm_label="senior",
+        llm_evidence_ok=True,
+        llm_basis="system_ownership",
+        page_text_flat_lower=" ".join(jd.lower().split()),
+        page_text_orig=jd,
+        final_job_title="Platform Engineer",
+        ownership_and_scope={},
+    )
+
+    assert level == "senior"
+    assert overridden is False
+    assert reason == "keep_llm_evidence_ok"
+    assert signals["has_grounded_seniority_basis"] is True

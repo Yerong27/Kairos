@@ -1271,6 +1271,12 @@ GLOBAL RULES:
    - **LEAD / PRINCIPAL**: Focus on **Strategy** & **Influence**.
      Keywords: "Set direction", "Mentor", "Cross-functional alignment", "Drive standards", "Stakeholder management". Scope: Team / Organization.
    - **NOTE**: Many JDs don't put "Lead" in the title but describe Lead-level influence. Trust the **responsibilities** over the title.
+   - A design, architecture, collaboration, or stakeholder task by itself does
+     NOT establish seniority. Distinguish doing the task from owning its
+     outcome, leading people, or setting direction across an organization.
+   - Select one `job_seniority_basis` category and cite 1-3 job passage IDs.
+     If the JD does not provide enough evidence, return `unknown`, `unclear`,
+     and an empty evidence-ID list. Do not guess a level from job prestige.
 
 10) OWNERSHIP & SCOPE (Critical for Precision):
    Extract these signals explicitly (Integer Levels 0-3):
@@ -1292,7 +1298,9 @@ Produce a single valid JSON object following this structure. Do NOT wrap in mark
 {{
   "job_title": "string",
   "company": "string",
-  "job_seniority_signal": "junior|mid|senior|lead|principal",
+  "job_seniority_signal": "junior|mid|senior|lead|principal|unknown",
+  "job_seniority_basis": "explicit_title|explicit_experience|individual_execution|system_ownership|people_leadership|organizational_scope|unclear",
+  "job_seniority_evidence_ids": ["1-3 exact IDs from job_passages, or empty when unclear"],
   "domain_requirements": [
     {{
       "domain_id": "string (optional, copy 'id' from catalog if exact match)",
@@ -1399,6 +1407,17 @@ OUTPUT LANGUAGE: {output_language}
             raise RuntimeError("Gemini job analysis returned no response")
         # Verify JSON
         parsed_ir = AnalyzeIRv3.model_validate_json(resp.text)
+        seniority_ids = _dedupe_keep_order(
+            [
+                str(value).strip()
+                for value in (parsed_ir.job_seniority_evidence_ids or [])
+                if str(value).strip() in jd_passage_map
+            ]
+        )[:3]
+        parsed_ir.job_seniority_evidence_ids = seniority_ids
+        parsed_ir.job_seniority_evidence = (
+            jd_passage_map[seniority_ids[0]] if seniority_ids else None
+        )
         invalid_jd_evidence = []
         for requirement in parsed_ir.domain_requirements:
             cited_ids = _dedupe_keep_order(
@@ -2019,6 +2038,7 @@ def _revised_seniority_decision(
     page_text_flat_lower: str,
     page_text_orig: str,
     final_job_title: str,
+    llm_basis: str = "unclear",
     ownership_and_scope: Any = None,
     years_experience: str = "",
 ) -> Tuple[SeniorityLabel, str, bool, str, Dict[str, bool]]:
@@ -2026,6 +2046,16 @@ def _revised_seniority_decision(
         ownership_and_scope
     )
     experience_range = _explicit_experience_range(years_experience)
+    grounded_high_seniority_bases = {
+        "explicit_title",
+        "explicit_experience",
+        "system_ownership",
+        "people_leadership",
+        "organizational_scope",
+    }
+    grounded_high_seniority = bool(
+        llm_evidence_ok and llm_basis in grounded_high_seniority_bases
+    )
     signals: Dict[str, bool] = {
         "has_junior_growth": RE_JUNIOR_GROWTH.search(page_text_flat_lower) is not None,
         "has_strong_senior_only": RE_STRONG_SENIOR_ONLY.search(page_text_flat_lower) is not None,
@@ -2035,6 +2065,7 @@ def _revised_seniority_decision(
         ),
         "has_structured_leadership": leadership_level >= 2,
         "has_system_ownership": ownership_level >= 3,
+        "has_grounded_seniority_basis": grounded_high_seniority,
     }
 
     title_hint_label, title_hint_quote, title_hint_reason = _title_seniority_hint(final_job_title, page_text_orig)
@@ -2064,6 +2095,15 @@ def _revised_seniority_decision(
             q = _find_first_match_quote(page_text_orig, RE_JUNIOR_GROWTH, "learn")
             return apply_experience_cap(
                 "junior", q, True, "downgrade_senior_due_to_early_career_context"
+            )
+
+        if llm_label in ("senior", "lead", "principal") and not grounded_high_seniority:
+            return (
+                "unknown",
+                "",
+                True,
+                "unsupported_high_seniority_without_grounded_basis",
+                signals,
             )
 
         if llm_label in ("intern", "junior", "mid") and signals["has_strong_senior_only"]:
@@ -2545,6 +2585,9 @@ def analyze_v3(
     j_sen_evidence = _normalize_whitespace(
         str(job.get("job_seniority_evidence") or raw.get("job_seniority_evidence") or "")
     )
+    j_sen_basis = _normalize_whitespace(
+        str(job.get("job_seniority_basis") or raw.get("job_seniority_basis") or "unclear")
+    ).lower()
 
     llm_evidence_ok = _validate_quote(j_sen_evidence, page_text_flat_lower)
     if not llm_evidence_ok:
@@ -2569,6 +2612,7 @@ def analyze_v3(
         page_text_flat_lower=page_text_flat_lower,
         page_text_orig=page_text_orig,
         final_job_title=final_job_title,
+        llm_basis=j_sen_basis,
         ownership_and_scope=raw_ownership_and_scope,
         years_experience=years_experience_hint,
     )
@@ -2955,6 +2999,7 @@ def analyze_v3(
         raw["_debug_meta"]["seniority_override_applied"] = override_applied
         raw["_debug_meta"]["seniority_override_reason"] = override_reason
         raw["_debug_meta"]["llm_job_seniority"] = llm_label
+        raw["_debug_meta"]["llm_job_seniority_basis"] = j_sen_basis
         raw["_debug_meta"]["llm_job_seniority_evidence_ok"] = llm_evidence_ok
         raw["_debug_meta"]["seniority_signals"] = signals
 
@@ -3003,6 +3048,13 @@ def analyze_v3(
         company=company,
         location=location,
         job_seniority_signal=job_seniority_signal,
+        job_seniority_basis=j_sen_basis,
+        job_seniority_evidence_ids=[
+            str(value)
+            for value in _safe_list(raw.get("job_seniority_evidence_ids"))
+            if str(value).strip()
+        ][:3],
+        job_seniority_evidence=job_seniority_evidence_final or None,
         candidate_seniority_signal=candidate_seniority_signal,
         candidate_skills=candidate_skills,
         candidate_evidence_claims=profile.evidence_claims,

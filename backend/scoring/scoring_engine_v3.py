@@ -3086,8 +3086,11 @@ def score_ir_v3(
 # ============================================================
 def actions_to_sentences(actions):
     """
-    Render actions as bullet-style multi-line strings.
-    Output remains List[str] for Notion-friendly display.
+    Flatten structured actions into complete, independently renderable items.
+
+    Notion limits each rich-text item to 2,000 characters and the writer also
+    applies a display clamp. Keeping the heading and every step separate avoids
+    silently cutting a multi-line action in the middle.
     """
     if not actions:
         return []
@@ -3106,30 +3109,22 @@ def actions_to_sentences(actions):
         why = (act.get("why") or "").strip()
         steps = act.get("steps") or []
 
-        lines: List[str] = []
         head = (title + items_str).strip() or "Action"
         if why:
-            lines.append(f"{head} — {why}")
+            out.append(f"{head} — {why}")
         else:
-            lines.append(head)
+            out.append(head)
 
         if isinstance(steps, str):
             s = steps.strip()
             if s:
-                lines.append(f"- {s}")
+                out.append(s)
         elif isinstance(steps, list):
-            cleaned = []
             for s in steps:
                 s2 = str(s).strip()
                 if not s2:
                     continue
-                cleaned.append(s2.rstrip("."))
-            for s2 in cleaned[:10]:
-                lines.append(f"- {s2}")
-        else:
-            pass
-
-        out.append("\n".join(lines).strip())
+                out.append(s2)
 
     return out
 
@@ -3392,31 +3387,22 @@ def score_to_public_dict(result: ScoreResultV3) -> Dict[str, Any]:
         if (not must_missing) and (not rec_missing) and soft_domains:
             top_soft = _top_n(soft_domains, 3)
 
-            def _evidence_steps(domain_name: str) -> List[str]:
-                return [
-                    f"[{domain_name}] Add 1 bullet that proves you built/shipped something (not just used tools).",
-                    "Use an action verb: Built / Implemented / Deployed / Optimized / Migrated / Owned.",
-                    "Include scope: requests/day, dataset size, users, services, latency, cost, accuracy (pick 1–2).",
-                    "Include environment: prod/staging, CI/CD, monitoring/alerts, rollback, on-call (pick what applies).",
-                    'Use a tight template: “Built X with Y; handled Z; deployed to A; improved B by N%.”',
-                ]
-
-            steps_flat: List[str] = []
-            for dd in top_soft:
-                steps_flat.extend(_evidence_steps(dd))
-                steps_flat.append("")
-
-            steps_flat = [s for s in steps_flat if s.strip()]
+            steps_flat = [
+                (
+                    f"{domain_name}: add one resume bullet showing what you did, "
+                    "the context or audience, the scope, and the result."
+                )
+                for domain_name in top_soft
+            ]
 
             actions.insert(
                 0,
                 {
-                    "title": "Turn soft matches into strong evidence",
-                    "why": "Several domains are counted as soft hits (weak evidence). Strengthening 1–3 bullets often lifts the score more than adding new skills.",
+                    "title": "Strengthen evidence for partial matches",
+                    "why": "The resume is relevant, but these requirements need more specific proof.",
                     "steps": steps_flat
                     + [
-                        "Add 1 artifact proof (choose one): repo link / API spec / architecture diagram / dashboard screenshot.",
-                        "If possible, pin the artifact in your resume (top projects) and link it in the application.",
+                        "Where appropriate, link one concise work sample or portfolio artifact that supports the strongest claim.",
                     ],
                     "tags": ["evidence", "resume", "portfolio"],
                     "priority": "high",

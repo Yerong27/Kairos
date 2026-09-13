@@ -672,7 +672,7 @@ def _render_requirement_matrix_to_notion(public_contract: Dict[str, Any], resp: 
     actions = _norm_strengths_gaps_items(_as_list(public_contract.get("actions")))
     if actions:
         blocks.append(_notion_divider())
-        blocks.extend(_notion_bullets("🛠 Resume / Skill Actions", actions, heading_level=2, max_items=10))
+        blocks.extend(_notion_bullets("🛠 Resume / Skill Actions", actions, heading_level=2, max_items=30))
 
     blocks.append(_notion_divider())
     blocks.append(

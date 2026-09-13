@@ -11,7 +11,32 @@ from backend.ir.schema_v3 import (
     DomainRequirement,
 )
 from backend.llm import analyze_v3 as analyzer
-from backend.scoring.scoring_engine_v3 import score_ir_v3, score_to_public_dict
+from backend.scoring.scoring_engine_v3 import (
+    actions_to_sentences,
+    score_ir_v3,
+    score_to_public_dict,
+)
+
+
+def test_actions_render_as_separate_complete_items():
+    actions = actions_to_sentences(
+        [
+            {
+                "title": "Strengthen evidence",
+                "why": "The resume needs more specific proof.",
+                "items": ["Vendor evaluation", "Solution design"],
+                "steps": [
+                    "Vendor evaluation: add one outcome-based resume bullet.",
+                    "Solution design: add one outcome-based resume bullet.",
+                    "Link one relevant work sample.",
+                ],
+            }
+        ]
+    )
+
+    assert len(actions) == 4
+    assert actions[-1] == "Link one relevant work sample."
+    assert all("\n" not in item for item in actions)
 
 
 def test_semantic_comparison_controls_transferability_and_apply_recommendation():
