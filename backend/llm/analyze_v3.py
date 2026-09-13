@@ -1277,6 +1277,11 @@ GLOBAL RULES:
    - Select one `job_seniority_basis` category and cite 1-3 job passage IDs.
      If the JD does not provide enough evidence, return `unknown`, `unclear`,
      and an empty evidence-ID list. Do not guess a level from job prestige.
+   - Keep the basis consistent with `ownership_and_scope`: system_ownership
+     requires ownership.level_val=3; people_leadership requires
+     leadership.level_val>=2; organizational_scope requires scope.level_val=3
+     together with level-3 ownership or level-2+ leadership. Influencing or
+     contributing to a decision is not the same as owning that decision.
 
 10) OWNERSHIP & SCOPE (Critical for Precision):
    Extract these signals explicitly (Integer Levels 0-3):
@@ -2046,16 +2051,19 @@ def _revised_seniority_decision(
         ownership_and_scope
     )
     experience_range = _explicit_experience_range(years_experience)
-    grounded_high_seniority_bases = {
-        "explicit_title",
-        "explicit_experience",
-        "system_ownership",
-        "people_leadership",
-        "organizational_scope",
-    }
-    grounded_high_seniority = bool(
-        llm_evidence_ok and llm_basis in grounded_high_seniority_bases
+    title_hint_label, title_hint_quote, title_hint_reason = _title_seniority_hint(
+        final_job_title, page_text_orig
     )
+    basis_is_structurally_supported = {
+        "explicit_title": title_hint_label != "unknown",
+        "explicit_experience": experience_range is not None,
+        "system_ownership": ownership_level >= 3,
+        "people_leadership": leadership_level >= 2,
+        "organizational_scope": (
+            scope_level >= 3 and (ownership_level >= 3 or leadership_level >= 2)
+        ),
+    }.get(llm_basis, False)
+    grounded_high_seniority = bool(llm_evidence_ok and basis_is_structurally_supported)
     signals: Dict[str, bool] = {
         "has_junior_growth": RE_JUNIOR_GROWTH.search(page_text_flat_lower) is not None,
         "has_strong_senior_only": RE_STRONG_SENIOR_ONLY.search(page_text_flat_lower) is not None,
@@ -2068,7 +2076,6 @@ def _revised_seniority_decision(
         "has_grounded_seniority_basis": grounded_high_seniority,
     }
 
-    title_hint_label, title_hint_quote, title_hint_reason = _title_seniority_hint(final_job_title, page_text_orig)
     signals["has_title_hint"] = title_hint_label != "unknown"
 
     if title_hint_label != "unknown":

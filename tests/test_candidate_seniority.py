@@ -231,10 +231,37 @@ def test_grounded_system_ownership_can_support_senior_label():
         page_text_flat_lower=" ".join(jd.lower().split()),
         page_text_orig=jd,
         final_job_title="Platform Engineer",
-        ownership_and_scope={},
+        ownership_and_scope={
+            "ownership": {"level_val": 3},
+            "scope": {"level_val": 2},
+            "leadership": {"level_val": 0},
+        },
     )
 
     assert level == "senior"
     assert overridden is False
     assert reason == "keep_llm_evidence_ok"
     assert signals["has_grounded_seniority_basis"] is True
+
+
+def test_influencing_decisions_is_not_system_ownership():
+    jd = "Influence major technology decisions by testing, validating and proving what is possible."
+
+    level, _quote, overridden, reason, signals = _revised_seniority_decision(
+        llm_label="senior",
+        llm_evidence_ok=True,
+        llm_basis="system_ownership",
+        page_text_flat_lower=" ".join(jd.lower().split()),
+        page_text_orig=jd,
+        final_job_title="AI Product Engineer",
+        ownership_and_scope={
+            "ownership": {"level_val": 2},
+            "scope": {"level_val": 3},
+            "leadership": {"level_val": 0},
+        },
+    )
+
+    assert level == "unknown"
+    assert overridden is True
+    assert reason == "unsupported_high_seniority_without_grounded_basis"
+    assert signals["has_grounded_seniority_basis"] is False
