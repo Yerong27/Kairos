@@ -50,18 +50,22 @@ async function extractFromFixture({ url, title, elements = [], jsonLd = [], cloc
     chrome,
     console,
     Date: clock,
+    URL,
     setTimeout,
   });
   await new Promise((resolve) => setImmediate(resolve));
   return messages;
 }
 
-test("only supported job detail URLs are accepted", () => {
+test("supported sites include SEEK search pages with a selected ad", () => {
   const supportedJobSite = siteMatcher();
   assert.equal(supportedJobSite("https://www.linkedin.com/jobs/view/123/"), "linkedin");
   assert.equal(supportedJobSite("https://www.seek.com.au/job/12345678?type=promoted"), "seek");
   assert.equal(supportedJobSite("https://seek.com.au/job/12345678"), "seek");
-  assert.equal(supportedJobSite("https://www.seek.com.au/jobs-in-technology"), "");
+  assert.equal(supportedJobSite("https://www.seek.com.au/jobs?jobId=12345678"), "seek");
+  assert.equal(supportedJobSite("https://www.seek.com.au/engineering-jobs?jobId=12345678"), "seek");
+  assert.equal(supportedJobSite("https://www.seek.com.au/jobs?jobId=not-a-job"), "seek");
+  assert.equal(supportedJobSite("https://www.seek.com.au/jobs-in-technology"), "seek");
   assert.equal(supportedJobSite("https://seek.com.au.evil.example/job/12345678"), "");
 });
 
@@ -86,6 +90,22 @@ test("SEEK detail container is sent without surrounding search results", async (
   assert.equal(payload.extraction_meta.source, "seek_selector");
   assert.ok(payload.page_text.includes("About the role"));
   assert.ok(!payload.page_text.includes("Unrelated listing"));
+});
+
+test("SEEK split-view job URL resolves to the selected job", async () => {
+  const description = "Build reliable services and work with customers. ".repeat(15);
+  const messages = await extractFromFixture({
+    url: "https://www.seek.com.au/engineering-jobs?jobId=12345678&type=standard",
+    title: "Product Engineer at Example - SEEK",
+    elements: [
+      element('[data-automation="jobAdDetails"]', description),
+      element('[data-automation="job-detail-title"]', "Product Engineer"),
+    ],
+  });
+  const payload = messages.find((message) => message.type === "JD_EXTRACT");
+  assert.ok(payload);
+  assert.equal(payload.url, "https://www.seek.com.au/job/12345678");
+  assert.ok(payload.page_text.includes("Build reliable services"));
 });
 
 test("SEEK JobPosting JSON-LD works when its detail selector is absent", async () => {

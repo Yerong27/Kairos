@@ -189,7 +189,13 @@
       source = "json_ld";
     }
     description = clean(description).slice(0, MAX_DESCRIPTION_CHARS);
-    const canonicalUrl = clean(window.location.href.split("?")[0].split("#")[0]);
+    const currentUrl = new URL(window.location.href);
+    const jobId = currentUrl.searchParams.get("jobId");
+    const canonicalUrl = /^\/job\/\d+\/?$/i.test(currentUrl.pathname)
+      ? `${currentUrl.origin}${currentUrl.pathname}`
+      : jobId && /^\d+$/.test(jobId)
+        ? `${currentUrl.origin}/job/${jobId}`
+        : clean((jsonLd && jsonLd.url) || window.location.href.split("#")[0]);
     const quality = description.length >= 800 ? "good" : (description.length >= 200 ? "partial" : "poor");
     const structuredText = clean([
       `Job title: ${title}`, `Company: ${company}`, `Location: ${location}`,

@@ -23,9 +23,11 @@ let analysisIsRunning = false;
 let analysisStateTimer = null;
 let notionIsConnected = false;
 let uploadIsRunning = false;
+let analyzeBlockReason = "Checking your resume status…";
 
 function updateAnalyzeAvailability() {
-  analyzeBtn.disabled = !profileIsReady || analysisIsRunning;
+  analyzeBtn.disabled = analysisIsRunning;
+  analyzeBtn.title = profileIsReady ? "" : analyzeBlockReason;
 }
 
 function selectedResume() {
@@ -108,6 +110,7 @@ function getToken(cb) {
 function setStatusDisconnected() {
   notionIsConnected = false;
   profileIsReady = false;
+  analyzeBlockReason = "Connect Notion before analyzing a job.";
   notionStatus.textContent = "Not connected";
   setTone(notionDot, "warning");
   dbName.textContent = "Connect to choose a database";
@@ -162,6 +165,7 @@ function refreshStatus() {
           resumeMeta.textContent = meta.join(" • ");
           updateResumeActions();
           profileIsReady = profileReady;
+          analyzeBlockReason = profileReady ? "" : "Re-upload the resume to create or retry its Candidate Profile.";
           updateAnalyzeAvailability();
           if (profileReady) {
             restoreAnalysisState("Ready for a new analysis. Open a LinkedIn or SEEK job page first.");
@@ -174,6 +178,7 @@ function refreshStatus() {
           resumeMeta.textContent = "PDF, DOCX, or TXT";
           updateResumeActions();
           profileIsReady = false;
+          analyzeBlockReason = "Upload a resume before analyzing a job.";
           updateAnalyzeAvailability();
           analyzeMsg.textContent = "Upload a resume before analyzing a job.";
         }
@@ -191,6 +196,7 @@ function refreshStatus() {
         analyzeMsg.textContent = "";
         updateResumeActions();
         profileIsReady = false;
+        analyzeBlockReason = "Kairos backend is unavailable. Start it, then try again.";
         updateAnalyzeAvailability();
       });
   });
@@ -280,6 +286,10 @@ resumeFile.addEventListener("change", () => {
 uploadBtn.addEventListener("click", uploadSelectedResume);
 
 analyzeBtn.addEventListener("click", () => {
+  if (!profileIsReady) {
+    analyzeMsg.textContent = analyzeBlockReason;
+    return;
+  }
   analysisIsRunning = true;
   updateAnalyzeAvailability();
   analyzeMsg.textContent = "Reading the current job page…";
