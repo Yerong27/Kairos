@@ -62,6 +62,7 @@ test("supported sites include SEEK search pages with a selected ad", () => {
   assert.equal(supportedJobSite("https://www.linkedin.com/jobs/view/123/"), "linkedin");
   assert.equal(supportedJobSite("https://www.seek.com.au/job/12345678?type=promoted"), "seek");
   assert.equal(supportedJobSite("https://seek.com.au/job/12345678"), "seek");
+  assert.equal(supportedJobSite("https://au.seek.com/job/94576981"), "seek");
   assert.equal(supportedJobSite("https://www.seek.com.au/jobs?jobId=12345678"), "seek");
   assert.equal(supportedJobSite("https://www.seek.com.au/engineering-jobs?jobId=12345678"), "seek");
   assert.equal(supportedJobSite("https://www.seek.com.au/jobs?jobId=not-a-job"), "seek");
@@ -106,6 +107,22 @@ test("SEEK split-view job URL resolves to the selected job", async () => {
   assert.ok(payload);
   assert.equal(payload.url, "https://www.seek.com.au/job/12345678");
   assert.ok(payload.page_text.includes("Build reliable services"));
+});
+
+test("SEEK au.seek.com job is extracted as SEEK", async () => {
+  const description = "Work with cloud infrastructure, automation and customers. ".repeat(15);
+  const messages = await extractFromFixture({
+    url: "https://au.seek.com/job/94576981",
+    title: "Associate Cloud Engineer Job in Melbourne VIC - SEEK",
+    elements: [
+      element('[data-automation="jobAdDetails"]', description),
+      element('[data-automation="job-detail-title"]', "Associate Cloud Engineer"),
+    ],
+  });
+  const payload = messages.find((message) => message.type === "JD_EXTRACT");
+  assert.ok(payload);
+  assert.equal(payload.url, "https://au.seek.com/job/94576981");
+  assert.equal(payload.extraction_meta.site, "seek");
 });
 
 test("SEEK JobPosting JSON-LD works when its detail selector is absent", async () => {

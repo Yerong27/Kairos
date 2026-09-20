@@ -8,7 +8,9 @@
     "Show more jobs", "This job alert is on",
   ];
   const NAV_MARKERS = ["Skip to search", "Skip to main content", "My Network", "Notifications"];
-  const site = /(^|\.)seek\.com\.au$/i.test(window.location.hostname) ? "seek" : "linkedin";
+  const isSeek = /(^|\.)seek\.com\.au$/i.test(window.location.hostname)
+    || window.location.hostname.toLowerCase() === "au.seek.com";
+  const site = isSeek ? "seek" : "linkedin";
 
   function clean(value) {
     return String(value || "")

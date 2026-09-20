@@ -118,7 +118,7 @@ function supportedJobSite(rawUrl) {
     if ((host === "www.linkedin.com" || host === "linkedin.com") && /^\/jobs\//i.test(url.pathname)) {
       return "linkedin";
     }
-    if (host === "www.seek.com.au" || host === "seek.com.au") {
+    if (host === "www.seek.com.au" || host === "seek.com.au" || host === "au.seek.com") {
       // SEEK can show a selected ad inside search results without a /job/ URL.
       // The content script verifies that a readable ad is present before analysis.
       return "seek";
