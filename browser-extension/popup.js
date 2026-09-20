@@ -87,7 +87,7 @@ function resetAnalysisForResume() {
   updateAnalyzeAvailability();
   return new Promise((resolve) => {
     chrome.storage.local.remove([ANALYSIS_STATE_KEY, "last_result"], () => {
-      analyzeMsg.textContent = "Resume updated. Open a LinkedIn job page, then select Analyze.";
+      analyzeMsg.textContent = "Resume updated. Open a LinkedIn or SEEK job page, then select Analyze.";
       resolve();
     });
   });
@@ -164,7 +164,7 @@ function refreshStatus() {
           profileIsReady = profileReady;
           updateAnalyzeAvailability();
           if (profileReady) {
-            restoreAnalysisState("Ready for a new analysis. Open a LinkedIn job page first.");
+            restoreAnalysisState("Ready for a new analysis. Open a LinkedIn or SEEK job page first.");
           } else {
             analyzeMsg.textContent = "Re-upload the resume to create or retry its Candidate Profile.";
           }

@@ -1,6 +1,6 @@
 # Kairos
 
-Kairos 是一个本地运行的求职匹配助手：从 LinkedIn 读取职位描述，与简历进行比较，并把结果保存到 Notion。
+Kairos 是一个本地运行的求职匹配助手：从 LinkedIn 或 SEEK 读取职位描述，与简历进行比较，并把结果保存到 Notion。
 
 **[复制 Notion 模板](https://lateral-band-b45.notion.site/Kairos-3a0fad1d15b3803f8581dd2b466dd40e)**
 
@@ -83,8 +83,8 @@ uvicorn main:app --reload
 1. 点击 Kairos 图标，打开会保持显示的 Side Panel。
 2. 连接 Notion，并在授权时选择刚复制的 `Kairos Job Tracker`。
 3. 点击 `Choose file` 选择 PDF、DOCX 或 TXT 简历，再点击 `Upload resume`，等待 Resume ready。
-4. 打开 LinkedIn 职位详情页。
-5. 点击 `Analyze LinkedIn job`。分析期间可以切换标签页，进度不会丢失。
+4. 打开 LinkedIn 或 SEEK 的职位详情页（SEEK 应为 `/job/职位ID`，不是搜索结果页）。
+5. 点击 `Analyze this job`。分析期间可以切换标签页，进度不会丢失。
 6. 在 Notion 查看匹配分数、`Should Apply?`、要求覆盖和简历证据。
 
 更换简历时重新上传即可。相同内容的简历不会重复解析。
@@ -136,7 +136,7 @@ python -m pytest -q
 
 # English
 
-Kairos is a local job-matching assistant. It reads a job description from LinkedIn, compares it with your resume, and saves the result to Notion.
+Kairos is a local job-matching assistant. It reads a job description from LinkedIn or SEEK, compares it with your resume, and saves the result to Notion.
 
 **[Duplicate the Notion template](https://lateral-band-b45.notion.site/Kairos-3a0fad1d15b3803f8581dd2b466dd40e)**
 
@@ -217,8 +217,8 @@ Open <http://127.0.0.1:8000/health>. An `ok` response means the backend is ready
 1. Select the Kairos icon to open its persistent side panel.
 2. Connect Notion and authorize the duplicated `Kairos Job Tracker` database.
 3. Select a PDF, DOCX, or TXT resume with `Choose file`, then select `Upload resume` and wait for Resume ready.
-4. Open a LinkedIn job page.
-5. Select `Analyze LinkedIn job`. You can switch tabs while it runs without losing progress.
+4. Open a LinkedIn or SEEK job detail page (on SEEK, use a `/job/{id}` page, not search results).
+5. Select `Analyze this job`. You can switch tabs while it runs without losing progress.
 6. Review the score, `Should Apply?`, requirement coverage, and resume evidence in Notion.
 
 Upload again whenever your resume changes. Identical resume content is reused without another resume parse.

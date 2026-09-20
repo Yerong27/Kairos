@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Kairos Job Agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "minimum_chrome_version": "114",
   "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation", "sidePanel"],
   "host_permissions": [
     "http://localhost:8000/*",
     "http://127.0.0.1:8000/*",
-    "https://www.linkedin.com/*"
+    "https://linkedin.com/*",
+    "https://www.linkedin.com/*",
+    "https://seek.com.au/*",
+    "https://www.seek.com.au/*"
   ],
   "background": {
     "service_worker": "background.js"

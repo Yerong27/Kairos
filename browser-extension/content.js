@@ -8,6 +8,7 @@
     "Show more jobs", "This job alert is on",
   ];
   const NAV_MARKERS = ["Skip to search", "Skip to main content", "My Network", "Notifications"];
+  const site = /(^|\.)seek\.com\.au$/i.test(window.location.hostname) ? "seek" : "linkedin";
 
   function clean(value) {
     return String(value || "")
@@ -149,7 +150,67 @@
     return clean([address.addressLocality, address.addressRegion, address.addressCountry].filter(Boolean).join(", "));
   }
 
+  function seekDocumentFields() {
+    const value = clean(document.title).replace(/\s*[-|]\s*SEEK\s*$/i, "");
+    const match = value.match(/^(.*?)\s+at\s+(.*)$/i);
+    return match ? { title: match[1], company: match[2] } : { title: value, company: "" };
+  }
+
+  function extractSeek() {
+    const pool = allElements();
+    const jsonLd = readJsonLd();
+    const fallback = seekDocumentFields();
+    const organization = jsonLd && jsonLd.hiringOrganization;
+    const title = firstText([
+      '[data-automation="job-detail-title"]', '[data-automation="jobTitle"]',
+      '[data-automation="jobAdTitle"]', "main h1", "h1",
+    ], pool) || clean(jsonLd && jsonLd.title) || fallback.title;
+    const company = firstText([
+      '[data-automation="advertiser-name"]', '[data-automation="job-detail-company"]',
+      '[data-automation="jobCompany"]',
+    ], pool) || clean(typeof organization === "string" ? organization : organization && organization.name) || fallback.company;
+    const location = firstText([
+      '[data-automation="job-detail-location"]', '[data-automation="jobLocation"]',
+    ], pool) || locationFromJsonLd(jsonLd);
+
+    // SEEK's job-detail container is preferable to whole-page text: the latter
+    // includes search results, recommendations and navigation in split views.
+    let source = "seek_selector";
+    let description = firstText([
+      '[data-automation="jobAdDetails"]',
+      '[data-automation="jobAdDetailsContainer"]',
+      '[data-automation="jobDetailsContent"]',
+      '[data-automation="jobDetails"]',
+      '[data-automation="job-ad-details"]',
+      ".jobad-details",
+    ], pool);
+    if (!description && jsonLd && jsonLd.description) {
+      description = htmlToText(jsonLd.description);
+      source = "json_ld";
+    }
+    description = clean(description).slice(0, MAX_DESCRIPTION_CHARS);
+    const canonicalUrl = clean(window.location.href.split("?")[0].split("#")[0]);
+    const quality = description.length >= 800 ? "good" : (description.length >= 200 ? "partial" : "poor");
+    const structuredText = clean([
+      `Job title: ${title}`, `Company: ${company}`, `Location: ${location}`,
+      "", "Job description:", description,
+    ].join("\n"));
+
+    return {
+      url: canonicalUrl,
+      title: clean(title),
+      company: clean(company),
+      location: clean(location),
+      page_text: structuredText,
+      extraction_meta: {
+        site: "seek", source, quality, description_chars: description.length,
+        sent_chars: structuredText.length, json_ld: Boolean(jsonLd), shadow_dom: true,
+      },
+    };
+  }
+
   function extract() {
+    if (site === "seek") return extractSeek();
     const initialPool = allElements();
     expandDescription(initialPool);
     const pool = allElements();
@@ -197,7 +258,7 @@
       location: clean(location),
       page_text: structuredText,
       extraction_meta: {
-        source, quality, description_chars: description.length,
+        site: "linkedin", source, quality, description_chars: description.length,
         sent_chars: structuredText.length, json_ld: Boolean(jsonLd), shadow_dom: true,
       },
     };
@@ -215,15 +276,18 @@
 
   extractWhenReady()
     .then((payload) => {
+      if (site === "seek" && payload.extraction_meta.quality === "poor") {
+        throw new Error("SEEK job description was not found. Open the full job ad and try again.");
+      }
       chrome.runtime.sendMessage({ type: "JD_EXTRACT", ...payload }, (response) => {
         if (!response || !response.ok) console.error("Kairos extraction failed:", response && response.error);
       });
     })
     .catch((error) => {
-      console.error("Kairos LinkedIn extraction failed:", error);
+      console.error("Kairos job extraction failed:", error);
       chrome.runtime.sendMessage({
         type: "JD_EXTRACTION_FAILED",
-        title: document.title || "LinkedIn job",
+        title: document.title || "Job page",
         url: window.location.href,
         error: String(error && error.message ? error.message : error || "Could not extract the job page."),
       });

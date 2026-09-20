@@ -105,9 +105,26 @@ function injectContent(tabId) {
 function readableInjectionError(error) {
   const detail = String(error && error.message ? error.message : error || "");
   if (/cannot access|permission|host/i.test(detail)) {
-    return "Kairos could not access this LinkedIn tab. Reload the extension, then reopen the job page.";
+    return "Kairos could not access this job tab. Reload the extension, then reopen the job page.";
   }
   return detail ? `Could not read the job page: ${detail}` : "Could not read the job page.";
+}
+
+function supportedJobSite(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:") return "";
+    const host = url.hostname.toLowerCase();
+    if ((host === "www.linkedin.com" || host === "linkedin.com") && /^\/jobs\//i.test(url.pathname)) {
+      return "linkedin";
+    }
+    if ((host === "www.seek.com.au" || host === "seek.com.au") && /^\/job\/\d+\/?$/i.test(url.pathname)) {
+      return "seek";
+    }
+  } catch (_error) {
+    // An invalid or unsupported URL is not a job page.
+  }
+  return "";
 }
 
 function openNotionStart() {
@@ -174,8 +191,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: false, error: "No active tab" });
           return;
         }
-        if (!/^https:\/\/www\.linkedin\.com\/jobs\//i.test(String(tab.url || ""))) {
-          const error = "Open a LinkedIn job page before analyzing.";
+        if (!supportedJobSite(String(tab.url || ""))) {
+          const error = "Open a LinkedIn or SEEK job page before analyzing.";
           saveAnalysisState({
             status: "error",
             title: tab.title || "Current page",
@@ -207,10 +224,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg && msg.type === "JD_EXTRACTION_FAILED") {
-    const error = String(msg.error || "Could not extract the LinkedIn job description.");
+    const error = String(msg.error || "Could not extract the job description.");
     saveAnalysisState({
       status: "error",
-      title: msg.title || "LinkedIn job",
+      title: msg.title || "Job page",
       url: msg.url || "",
       message: error,
     });
@@ -241,7 +258,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       activeRequests.add(jobKey);
       const stateBase = {
         job_key: jobKey,
-        title: msg.title || "LinkedIn job",
+        title: msg.title || "Job page",
         company: msg.company || "",
         location: msg.location || "",
         url: msg.url || "",
